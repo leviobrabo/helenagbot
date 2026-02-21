@@ -495,7 +495,7 @@ async function start(message) {
                 [
                     {
                         text: "📬 Canal Oficial",
-                        url: "https://t.me/togurovisao",
+                        url: "https://t.me/toguroehelena",
                     },
                     {
                         text: "👨‍💻 Suporte",
@@ -525,7 +525,7 @@ async function start(message) {
                 [
                     {
                         text: "📬 Canal Oficial",
-                        url: "https://t.me/togurovisao",
+                        url: "https://t.me/toguroehelena",
                     },
                     {
                         text: "👨‍💻 Suporte",
@@ -762,7 +762,7 @@ async function saveNewChatMembers(msg) {
                             [
                                 {
                                     text: "Visite nosso canal",
-                                    url: "https://t.me/togurovisao",
+                                    url: "https://t.me/toguroehelena",
                                 },
                                 {
                                     text: "Relate bugs",
