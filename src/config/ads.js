@@ -40,7 +40,7 @@ const groupTemplates = [
         buttonText: "🚀 Ver Agora!",
     },
     {
-        text: `💡 <b>Dica do Toguro pra vocês!</b>\n\nDescobre como tantos estão ganhando dinheiro online com poucos cliques. Do interesse ao pagamento em segundos!\n\n📚 Cursos novos: <a href="https://t.me/cursobroff">@cursobroff</a>`,
+        text: `💡 <b>Dica do Helana pra vocês!</b>\n\nDescobre como tantos estão ganhando dinheiro online com poucos cliques. Do interesse ao pagamento em segundos!\n\n📚 Cursos novos: <a href="https://t.me/cursobroff">@cursobroff</a>`,
         buttonText: "💡 Quero Descobrir!",
     },
     {
@@ -48,7 +48,7 @@ const groupTemplates = [
         buttonText: "🎯 Quero Ganhar!",
     },
     {
-        text: `⚡ <b>Toguro indica!</b>\n\nEssa é a melhor forma de monetizar seu tempo online que eu já vi. Direto ao ponto: link, pagamento, feito!\n\n📚 <a href="https://t.me/cursobroff">@cursobroff</a>`,
+        text: `⚡ <b>Helana indica!</b>\n\nEssa é a melhor forma de monetizar seu tempo online que eu já vi. Direto ao ponto: link, pagamento, feito!\n\n📚 <a href="https://t.me/cursobroff">@cursobroff</a>`,
         buttonText: "⚡ Acessar!",
     },
 ];

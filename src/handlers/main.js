@@ -223,7 +223,7 @@ async function saveUserInformation(message) {
 
         if (isPrivate) {
             const notif =
-                `#Togurosbot #New_User\n` +
+                `#helenagbot #New_User\n` +
                 `<b>User:</b> <a href="tg://user?id=${user.id}">${user.first_name}</a>\n` +
                 `<b>ID:</b> <code>${user.id}</code>\n` +
                 `<b>Username:</b> ${user.username ? `@${user.username}` : "N/A"}\n` +
@@ -263,7 +263,7 @@ async function saveNewChatMembers(msg) {
 
         if (addedNow) {
             const notif =
-                `#Togurosbot #New_Group\n` +
+                `#helenagbot #New_Group\n` +
                 `<b>Group:</b> ${chatName}\n` +
                 `<b>ID:</b> <code>${chatId}</code>\n` +
                 `<b>Link:</b> ${chatLink}\n` +
@@ -275,7 +275,7 @@ async function saveNewChatMembers(msg) {
 
             bot.sendMessage(
                 chatId,
-                "Olá, me chamo Toguro! Obrigado por me adicionar ao grupo. Vou responder as mensagens da galera aqui kkkkk.",
+                "Olá, me chamo Helana! Obrigado por me adicionar ao grupo. Vou responder as mensagens da galera aqui kkkkk.",
                 {
                     reply_markup: {
                         inline_keyboard: [
@@ -320,11 +320,11 @@ async function start(message) {
 
     const devText =
         `Olá, <b>${firstName}</b>! Você é um dos desenvolvedores 🧑‍💻\n\n` +
-        `Você está no painel do Toguro. Use os comandos com responsabilidade.`;
+        `Você está no painel do Helana. Use os comandos com responsabilidade.`;
 
     const userText =
         `Olá, <b>${firstName}</b>!\n\n` +
-        `Eu sou <b>Toguro</b>, um bot que responde mensagens, áudios e figurinhas da galera 😄\n\n` +
+        `Eu sou <b>Helana</b>, um bot que responde mensagens, áudios e figurinhas da galera 😄\n\n` +
         `📣 <b>Novidades do bot:</b> <a href="https://t.me/lbrabo">@lbrabo</a>\n` +
         `📚 <b>Cursos:</b> <a href="https://t.me/cursobroff">@cursobroff</a>`;
 
@@ -334,7 +334,7 @@ async function start(message) {
             disable_web_page_preview: true,
             reply_markup: {
                 inline_keyboard: [
-                    [{ text: "📦 Github", url: "https://github.com/leviobrabo/togurosbot" }],
+                    [{ text: "📦 Github", url: "https://github.com/leviobrabo/helenegbot" }],
                     [
                         { text: "📣 Canal", url: "https://t.me/lbrabo" },
                         { text: "👨‍💻 Suporte", url: "https://t.me/kylorensbot" },
@@ -349,12 +349,12 @@ async function start(message) {
             disable_web_page_preview: true,
             reply_markup: {
                 inline_keyboard: [
-                    [{ text: "✨ Adicione-me em seu grupo", url: "https://t.me/togurosbot?startgroup=true" }],
+                    [{ text: "✨ Adicione-me em seu grupo", url: "https://t.me/helenagbot?startgroup=true" }],
                     [
                         { text: "📣 Canal Oficial", url: "https://t.me/lbrabo" },
                         { text: "👨‍💻 Suporte", url: "https://t.me/kylorensbot" },
                     ],
-                    [{ text: "📦 Github", url: "https://github.com/leviobrabo/togurosbot" }],
+                    [{ text: "📦 Github", url: "https://github.com/leviobrabo/helanagbot" }],
                 ],
             },
         });
@@ -384,7 +384,7 @@ async function stats(message) {
     const pages = [];
 
     pages.push(
-        `📊 <b>Estatísticas — Toguro</b>\n\n` +
+        `📊 <b>Estatísticas — Helana</b>\n\n` +
         `👥 <b>Usuários:</b> <code>${numUsers}</code>\n` +
         `🏘 <b>Grupos ativos:</b> <code>${numChats}</code>\n` +
         `💬 <b>Mensagens aprendidas:</b> <code>${numMessages}</code>`
@@ -487,13 +487,13 @@ async function ban(message) {
     if (chat.is_ban) return bot.sendMessage(message.chat.id, `Grupo <b>${chat.chatName}</b> já está banido.`, { parse_mode: "HTML" });
 
     await ChatModel.updateOne({ chatId }, { $set: { is_ban: true } });
-    await bot.sendMessage(chatId, "Toguro saindo do grupo!").catch(() => {});
+    await bot.sendMessage(chatId, "Helana saindo do grupo!").catch(() => {});
     await bot.leaveChat(chatId).catch(() => {});
     await bot.sendMessage(message.chat.id, `✅ Grupo <b>${chat.chatName}</b> banido com sucesso.`, { parse_mode: "HTML" });
 
     bot.sendMessage(
         groupId,
-        `#Togurosbot #Banned\n<b>Group:</b> ${chat.chatName}\n<b>ID:</b> <code>${chatId}</code>`,
+        `#helenagbot #Banned\n<b>Group:</b> ${chat.chatName}\n<b>ID:</b> <code>${chatId}</code>`,
         { parse_mode: "HTML", ...(logMsgId && { reply_to_message_id: logMsgId }) }
     ).catch(() => {});
 }
@@ -523,7 +523,7 @@ async function unban(message) {
 
     bot.sendMessage(
         groupId,
-        `#Togurosbot #Unban\n<b>Group:</b> ${chat.chatName}\n<b>ID:</b> <code>${chatId}</code>`,
+        `#helenagbot #Unban\n<b>Group:</b> ${chat.chatName}\n<b>ID:</b> <code>${chatId}</code>`,
         { parse_mode: "HTML", ...(logMsgId && { reply_to_message_id: logMsgId }) }
     ).catch(() => {});
 }
@@ -829,7 +829,7 @@ async function sendStatus() {
     const numChats = await ChatModel.countDocuments({ is_ban: false });
     await bot
         .editMessageText(
-            `#Togurosbot #Status\n\nStatus: ON\nPing: \`${ping}ms\`\nUptime: \`${timeFormatter(process.uptime())}\`\nUsuários: \`${numUsers}\`\nGrupos: \`${numChats}\``,
+            `#helenagbot #Status\n\nStatus: ON\nPing: \`${ping}ms\`\nUptime: \`${timeFormatter(process.uptime())}\`\nUsuários: \`${numUsers}\`\nGrupos: \`${numChats}\``,
             { chat_id: replied.chat.id, message_id: replied.message_id, parse_mode: "Markdown" }
         )
         .catch(() => {});
@@ -838,15 +838,15 @@ async function sendStatus() {
 // ─── lifecycle ────────────────────────────────────────────────────────────────
 
 function sendBotOnlineMessage() {
-    console.log("Toguro iniciado com sucesso...");
-    bot.sendMessage(groupId, "#Toguro #ONLINE\n\nBot is now playing ...", {
+    console.log("Helana iniciado com sucesso...");
+    bot.sendMessage(groupId, "#Helana #ONLINE\n\nBot is now playing ...", {
         ...(logMsgId && { reply_to_message_id: logMsgId }),
     }).catch(() => {});
 }
 
 function sendBotOfflineMessage() {
-    console.log("Toguro encerrado...");
-    bot.sendMessage(groupId, "#Toguro #OFFLINE\n\nBot is now off ...", {
+    console.log("Helana encerrado...");
+    bot.sendMessage(groupId, "#Helana #OFFLINE\n\nBot is now off ...", {
         ...(logMsgId && { reply_to_message_id: logMsgId }),
     })
         .then(() => process.exit(0))
@@ -902,7 +902,7 @@ function registerCallbackHandler() {
             const firstName = q.from.first_name;
             const devText =
                 `Olá, <b>${firstName}</b>! Você é um dos desenvolvedores 🧑‍💻\n\n` +
-                `Você está no painel do Toguro. Use os comandos com responsabilidade.`;
+                `Você está no painel do Helana. Use os comandos com responsabilidade.`;
             await bot
                 .editMessageText(devText, {
                     parse_mode: "HTML",
@@ -911,7 +911,7 @@ function registerCallbackHandler() {
                     message_id: q.message.message_id,
                     reply_markup: {
                         inline_keyboard: [
-                            [{ text: "📦 Github", url: "https://github.com/leviobrabo/togurosbot" }],
+                            [{ text: "📦 Github", url: "https://github.com/leviobrabo/helenagbot" }],
                             [
                                 { text: "📣 Canal", url: "https://t.me/lbrabo" },
                                 { text: "👨‍💻 Suporte", url: "https://t.me/kylorensbot" },
