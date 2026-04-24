@@ -9,7 +9,7 @@ const port = process.env.PORT || 8080;
 initHandler();
 
 const server = http.createServer((request, response) =>
-    response.writeHead(200, { "content-type": "aplication/json" })
+    response.writeHead(200, { "content-type": "application/json" })
 );
 
 server.listen(port);
