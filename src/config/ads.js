@@ -1,4 +1,8 @@
 const links = [
+    "https://omg10.com/4/10930545",
+    "https://omg10.com/4/10930547",
+    "https://omg10.com/4/10930546",
+    "https://omg10.com/4/10930523",
     "https://www.profitablecpmratenetwork.com/djt7wpcj5z?key=3baa748bc0990b4b5c6727d07024a044",
     "https://www.profitablecpmratenetwork.com/ge7mn5gp?key=bebb7238590df1a541984429b5f12a77",
     "https://www.profitablecpmratenetwork.com/sjnxjg5x?key=512d296dd7bce4c432e80e070ba62fb9",
