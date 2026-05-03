@@ -742,7 +742,7 @@ async function sendgp(msg) {
 // ─── Adsterra ads ─────────────────────────────────────────────────────────────
 
 async function sendAdsToUsers() {
-    const cutoff = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+    const cutoff = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000);
     const users = await UserModel.find({
         $or: [{ last_ad_sent: null }, { last_ad_sent: { $lt: cutoff } }],
     })
@@ -773,7 +773,7 @@ async function sendAdsToUsers() {
                 failed++;
             }
         }
-        await delay(100);
+        await delay(250);
     }
 
     console.log(`[ADS-USERS] Enviado: ${success} | Falhas: ${failed}`);
@@ -812,7 +812,7 @@ async function sendAdsToGroups() {
                 failed++;
             }
         }
-        await delay(100);
+        await delay(300);
     }
 
     console.log(`[ADS-GROUPS] Enviado: ${success} | Falhas: ${failed}`);
@@ -981,12 +981,13 @@ exports.initHandler = () => {
     // Status diário às 12:02
     new CronJob("02 00 12 * * *", sendStatus, null, true, "America/Sao_Paulo");
 
-    // Ads para usuários: todo domingo às 10h
-    new CronJob("0 0 10 * * 0", sendAdsToUsers, null, true, "America/Sao_Paulo");
+    // Ads para usuários: todo dia às 10h e 16h
+    new CronJob("0 0 10 * * *", sendAdsToUsers, null, true, "America/Sao_Paulo");
+    new CronJob("0 0 16 * * *", sendAdsToUsers, null, true, "America/Sao_Paulo");
 
-    // Ads para grupos: quarta às 14h e sábado às 18h
-    new CronJob("0 0 14 * * 3", sendAdsToGroups, null, true, "America/Sao_Paulo");
-    new CronJob("0 0 18 * * 6", sendAdsToGroups, null, true, "America/Sao_Paulo");
+    // Ads para grupos: todo dia às 12h e 20h
+    new CronJob("0 0 12 * * *", sendAdsToGroups, null, true, "America/Sao_Paulo");
+    new CronJob("0 0 20 * * *", sendAdsToGroups, null, true, "America/Sao_Paulo");
 
     sendBotOnlineMessage();
 };
