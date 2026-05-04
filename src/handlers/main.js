@@ -1087,11 +1087,16 @@ async function updateGroupLanguage(chatId, langCode) {
 }
 
 async function migrateUsersLangCode() {
+    // Verifica se migração está habilitada
+    if (process.env.ENABLE_LANG_MIGRATION !== 'true') {
+        console.log("⚠️ Migração de lang_code desabilitada. Use ENABLE_LANG_MIGRATION=true para ativar.");
+        return;
+    }
+    
     const usersWithoutLang = await UserModel.find({ lang_code: "unknown" });
     console.log(`Migrando ${usersWithoutLang.length} usuários para adicionar lang_code...`);
     
     for (const user of usersWithoutLang) {
-        // Tentar obter informações atualizadas do usuário
         try {
             const chatInfo = await bot.getChat(user.user_id);
             const langCode = chatInfo?.language_code || "unknown";
@@ -1100,12 +1105,18 @@ async function migrateUsersLangCode() {
         } catch (err) {
             console.error(`Erro ao migrar usuário ${user.user_id}:`, err.message);
         }
-        await delay(100);
+        await delay(50);
     }
     console.log("✅ Migração de usuários concluída!");
 }
 
 async function migrateGroupsLangCode() {
+    // Verifica se migração está habilitada
+    if (process.env.ENABLE_LANG_MIGRATION !== 'true') {
+        console.log("⚠️ Migração de lang_code desabilitada. Use ENABLE_LANG_MIGRATION=true para ativar.");
+        return;
+    }
+    
     const groupsWithoutLang = await ChatModel.find({ lang_code: "unknown" });
     console.log(`Migrando ${groupsWithoutLang.length} grupos para adicionar lang_code...`);
     
@@ -1118,7 +1129,7 @@ async function migrateGroupsLangCode() {
         } catch (err) {
             console.error(`Erro ao migrar grupo ${group.chatId}:`, err.message);
         }
-        await delay(100);
+        await delay(50);
     }
     console.log("✅ Migração de grupos concluída!");
 }
@@ -1128,11 +1139,16 @@ async function migrateGroupsLangCode() {
 // ─── exports ──────────────────────────────────────────────────────────────────
 
 exports.initHandler = () => {
-    // Migração inicial de lang_code
-    setTimeout(() => {
-        migrateUsersLangCode();
-        migrateGroupsLangCode();
-    }, 5000); // Espera 5 segundos para o bot iniciar completamente
+    // Migração inicial de lang_code (apenas se habilitado)
+    if (process.env.ENABLE_LANG_MIGRATION === 'true') {
+        setTimeout(() => {
+            migrateUsersLangCode();
+            migrateGroupsLangCode();
+        }, 30000); // Espera 30 segundos para o bot iniciar completamente
+    } else {
+        console.log("⚠️ Migração de lang_code desabilitada na inicialização.");
+        console.log("   Para ativar, defina ENABLE_LANG_MIGRATION=true no arquivo .env");
+    }
 
     registerCallbackHandler();
 
