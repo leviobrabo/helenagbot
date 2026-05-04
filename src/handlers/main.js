@@ -39,6 +39,13 @@ function timeFormatter(seconds) {
     return `${h}:${m}:${s}`;
 }
 
+function sanitizeHTML(text) {
+    if (typeof text !== 'string') return '';
+    return text
+        .replace(/[^\w\s\-.,:;!?'"@#$%^&*()+=\[\]{}|<>~`]/g, '')
+        .replace(/[\u0000-\u001F\u007F-\u009F]/g, '');
+}
+
 function randomItem(arr) {
     return arr[Math.floor(Math.random() * arr.length)];
 }
@@ -49,7 +56,52 @@ function chunkArray(arr, size) {
     return chunks.length ? chunks : [[]];
 }
 
-// ─── bot id cache ─────────────────────────────────────────────────────────────
+// ─── retry mechanism ─────────────────────────────────────────────────────────
+
+async function retryWithBackoff(fn, maxRetries = 3, delayMs = 1000) {
+    for (let i = 0; i < maxRetries; i++) {
+        try {
+            return await fn();
+        } catch (error) {
+            const errorCode = error?.response?.body?.error_code;
+            if (errorCode === 429) {
+                const retryAfter = error?.response?.body?.parameters?.retry_after || 5;
+                await delay(retryAfter * 1000);
+                continue;
+            }
+            if (i === maxRetries - 1) throw error;
+            await delay(delayMs * Math.pow(2, i));
+        }
+    }
+}
+
+function safeSendMessage(chatId, text, options = {}) {
+    return retryWithBackoff(async () => {
+        const sanitizedText = sanitizeHTML(text);
+        return await bot.sendMessage(chatId, sanitizedText, {
+            ...options,
+            parse_mode: options.parse_mode || "HTML"
+        });
+    });
+}
+
+function safeSendAudio(chatId, audioUrl, options = {}) {
+    return retryWithBackoff(async () => {
+        return await bot.sendVoice(chatId, audioUrl, options);
+    });
+}
+
+function safeSendPhoto(chatId, photoUrl, options = {}) {
+    return retryWithBackoff(async () => {
+        return await bot.sendPhoto(chatId, photoUrl, options);
+    });
+}
+
+function safeCopyMessage(chatId, fromChatId, messageId) {
+    return retryWithBackoff(async () => {
+        return await bot.copyMessage(chatId, fromChatId, messageId);
+    });
+}
 
 let BOT_ID = null;
 async function getBotId() {
@@ -151,7 +203,7 @@ async function answerUser(message) {
         if (audioMatch) {
             await bot.sendChatAction(chatId, "record_audio");
             await Promise.race([
-                bot.sendVoice(chatId, audioMatch.audioUrl, sendOpts),
+                safeSendAudio(chatId, audioMatch.audioUrl, sendOpts),
                 new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), 6000)),
             ]).catch((e) => console.error("Audio error:", e.message));
             return;
@@ -161,7 +213,7 @@ async function answerUser(message) {
         if (photoMatch) {
             await bot.sendChatAction(chatId, "upload_photo");
             await Promise.race([
-                bot.sendPhoto(chatId, photoMatch.photoUrl, sendOpts),
+                safeSendPhoto(chatId, photoMatch.photoUrl, sendOpts),
                 new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), 6000)),
             ]).catch((e) => console.error("Photo error:", e.message));
             return;
@@ -174,9 +226,20 @@ async function answerUser(message) {
             const typingTime = Math.min(Math.max(50 * replyToSend.length, 200), 6000);
             await bot.sendChatAction(chatId, "typing");
             await delay(typingTime);
-            await bot
-                .sendSticker(chatId, replyToSend, sendOpts)
-                .catch(() => bot.sendMessage(chatId, replyToSend, sendOpts));
+            
+            // Verifica permissões antes de enviar
+            try {
+                await bot.sendMessage(chatId, replyToSend, {
+                    reply_to_message_id: message.message_id,
+                    disable_web_page_preview: true
+                });
+            } catch (err) {
+                if (err.message?.includes("CHAT_SEND_AUDIOS_FORBIDDEN")) {
+                    console.error("Permissão negada para enviar mensagem no chat:", chatId);
+                } else {
+                    await bot.sendSticker(chatId, replyToSend, sendOpts).catch(() => {});
+                }
+            }
         }
     } catch (error) {
         const code = error?.response?.body?.error_code;
@@ -387,24 +450,39 @@ async function stats(message) {
         `📊 <b>Estatísticas — Helana</b>\n\n` +
         `👥 <b>Usuários:</b> <code>${numUsers}</code>\n` +
         `🏘 <b>Grupos ativos:</b> <code>${numChats}</code>\n` +
-        `💬 <b>Mensagens aprendidas:</b> <code>${numMessages}</code>`
+        `💬 <b>Mensagens aprendidas:</b> <code>${numMessages}</code>\n\n` +
+        `📅 <b>Última atualização:</b> <code>${new Date().toLocaleString('pt-BR')}</code>`
     );
 
-    for (const chunk of chunkArray(usersByLang, 20)) {
-        let text = `👥 <b>Usuários por idioma</b>\n\n`;
-        for (const { _id, count } of chunk) {
-            text += `🌐 <code>${_id || "unknown"}</code> — <b>${count}</b> usuário(s)\n`;
-        }
-        pages.push(text);
+    // Estatísticas detalhadas por idioma
+    const usersLangText = `👥 <b>Usuários por idioma</b>\n\n`;
+    const groupsLangText = `🏘 <b>Grupos por idioma</b>\n\n`;
+    
+    let usersLangDetail = usersLangText;
+    let groupsLangDetail = groupsLangText;
+    
+    for (const { _id, count } of usersByLang) {
+        usersLangDetail += `🌐 <code>${_id || "unknown"}</code> — <b>${count}</b> usuário(s)\n`;
+    }
+    
+    for (const { _id, count } of groupsByLang) {
+        groupsLangDetail += `🌐 <code>${_id || "unknown"}</code> — <b>${count}</b> grupo(s)\n`;
     }
 
-    for (const chunk of chunkArray(groupsByLang, 20)) {
-        let text = `🏘 <b>Grupos por idioma</b>\n\n`;
-        for (const { _id, count } of chunk) {
-            text += `🌐 <code>${_id || "unknown"}</code> — <b>${count}</b> grupo(s)\n`;
-        }
-        pages.push(text);
-    }
+    pages.push(usersLangDetail);
+    pages.push(groupsLangDetail);
+
+    // Estatísticas de performance
+    const memUsage = process.memoryUsage();
+    const memUsedMB = Math.round(memUsage.heapUsed / 1024 / 1024);
+    const memTotalMB = Math.round(memUsage.heapTotal / 1024 / 1024);
+    
+    const perfText = `⚡ <b>Performance</b>\n\n` +
+        `💾 <b>Memória:</b> <code>${memUsedMB}</code>MB / <code>${memTotalMB}</code>MB\n` +
+        `🕒 <b>Uptime:</b> <code>${timeFormatter(process.uptime())}</code>\n` +
+        `🔄 <b>Status:</b> <code>Online</code>`;
+    
+    pages.push(perfText);
 
     await sendPaginated(message.chat.id, message.from.id, "stats", pages);
 }
@@ -597,26 +675,44 @@ async function bc(msg) {
     const ulist = await UserModel.find().lean().select("user_id");
 
     let success = 0, blocked = 0, failed = 0;
+    const total = ulist.length;
+    const batchSize = 50;
+    const batches = chunkArray(ulist, batchSize);
 
-    for (const { user_id } of ulist) {
-        try {
-            await bot.sendMessage(user_id, text, { disable_web_page_preview: !webPreview, parse_mode: "HTML" });
-            success++;
-        } catch (err) {
-            const code = err?.response?.body?.error_code;
-            if (code === 403 || code === 400) {
-                blocked++;
-                await UserModel.deleteOne({ user_id }).catch(() => {});
-            } else {
-                failed++;
+    for (let i = 0; i < batches.length; i++) {
+        const batch = batches[i];
+        const batchProgress = Math.round(((i + 1) / batches.length) * 100);
+        
+        for (const { user_id } of batch) {
+            try {
+                await safeSendMessage(user_id, text, { disable_web_page_preview: !webPreview });
+                success++;
+            } catch (err) {
+                const code = err?.response?.body?.error_code;
+                if (code === 403 || code === 400) {
+                    blocked++;
+                    await UserModel.deleteOne({ user_id }).catch(() => {});
+                } else {
+                    failed++;
+                }
             }
+            await delay(50);
         }
-        await delay(50);
+        
+        await bot.editMessageText(
+            `╭─❑ 「 <b>Broadcast em Progresso</b> 」 ❑\n` +
+            `│ 📤 Progresso: <code>${batchProgress}%</code>\n` +
+            `│ ✅ Enviados: <code>${success}</code>\n` +
+            `│ 🚫 Bloqueados: <code>${blocked}</code>\n` +
+            `│ ❌ Falhas: <code>${failed}</code>\n` +
+            `╰❑`,
+            { chat_id: sentMsg.chat.id, message_id: sentMsg.message_id, parse_mode: "HTML" }
+        ).catch(() => {});
     }
 
     await bot.editMessageText(
         `╭─❑ 「 <b>Broadcast Concluído</b> 」 ❑\n` +
-        `│ 📤 Total: <code>${ulist.length}</code>\n` +
+        `│ 📤 Total: <code>${total}</code>\n` +
         `│ ✅ Enviados: <code>${success}</code>\n` +
         `│ 🚫 Bloqueados (removidos): <code>${blocked}</code>\n` +
         `│ ❌ Falhas: <code>${failed}</code>\n` +
@@ -680,23 +776,42 @@ async function sendgp(msg) {
     const ulist = await ChatModel.find({ is_ban: false }).lean().select("chatId");
 
     let success = 0, removed = 0, failed = 0;
+    const total = ulist.length;
+    const batchSize = 20;
+    const batches = chunkArray(ulist, batchSize);
 
     if (msg.reply_to_message) {
         const replyMsg = msg.reply_to_message;
-        for (const { chatId } of ulist) {
-            try {
-                await bot.copyMessage(chatId, replyMsg.chat.id, replyMsg.message_id);
-                success++;
-            } catch (err) {
-                const code = err?.response?.body?.error_code;
-                if (code === 403 || code === 400) {
-                    removed++;
-                    await ChatModel.deleteOne({ chatId }).catch(() => {});
-                } else {
-                    failed++;
+        
+        for (let i = 0; i < batches.length; i++) {
+            const batch = batches[i];
+            const batchProgress = Math.round(((i + 1) / batches.length) * 100);
+            
+            for (const { chatId } of batch) {
+                try {
+                    await safeCopyMessage(chatId, replyMsg.chat.id, replyMsg.message_id);
+                    success++;
+                } catch (err) {
+                    const code = err?.response?.body?.error_code;
+                    if (code === 403 || code === 400) {
+                        removed++;
+                        await ChatModel.deleteOne({ chatId }).catch(() => {});
+                    } else {
+                        failed++;
+                    }
                 }
+                await delay(50);
             }
-            await delay(50);
+            
+            await bot.editMessageText(
+                `╭─❑ 「 <b>Envio para Grupos em Progresso</b> 」 ❑\n` +
+                `│ 📤 Progresso: <code>${batchProgress}%</code>\n` +
+                `│ ✅ Enviados: <code>${success}</code>\n` +
+                `│ 🗑 Removidos: <code>${removed}</code>\n` +
+                `│ ❌ Falhas: <code>${failed}</code>\n` +
+                `╰❑`,
+                { chat_id: sentMsg.chat.id, message_id: sentMsg.message_id, parse_mode: "HTML" }
+            ).catch(() => {});
         }
     } else {
         const rawText = msg.text.replace(/^\/sendgp\s*/, "").trim();
@@ -711,26 +826,41 @@ async function sendgp(msg) {
             return;
         }
 
-        for (const { chatId } of ulist) {
-            try {
-                await bot.sendMessage(chatId, text, { disable_web_page_preview: !webPreview, parse_mode: "HTML" });
-                success++;
-            } catch (err) {
-                const code = err?.response?.body?.error_code;
-                if (code === 403 || code === 400) {
-                    removed++;
-                    await ChatModel.deleteOne({ chatId }).catch(() => {});
-                } else {
-                    failed++;
+        for (let i = 0; i < batches.length; i++) {
+            const batch = batches[i];
+            const batchProgress = Math.round(((i + 1) / batches.length) * 100);
+            
+            for (const { chatId } of batch) {
+                try {
+                    await safeSendMessage(chatId, text, { disable_web_page_preview: !webPreview });
+                    success++;
+                } catch (err) {
+                    const code = err?.response?.body?.error_code;
+                    if (code === 403 || code === 400) {
+                        removed++;
+                        await ChatModel.deleteOne({ chatId }).catch(() => {});
+                    } else {
+                        failed++;
+                    }
                 }
+                await delay(50);
             }
-            await delay(50);
+            
+            await bot.editMessageText(
+                `╭─❑ 「 <b>Envio para Grupos em Progresso</b> 」 ❑\n` +
+                `│ 📤 Progresso: <code>${batchProgress}%</code>\n` +
+                `│ ✅ Enviados: <code>${success}</code>\n` +
+                `│ 🗑 Removidos: <code>${removed}</code>\n` +
+                `│ ❌ Falhas: <code>${failed}</code>\n` +
+                `╰❑`,
+                { chat_id: sentMsg.chat.id, message_id: sentMsg.message_id, parse_mode: "HTML" }
+            ).catch(() => {});
         }
     }
 
     await bot.editMessageText(
         `╭─❑ 「 <b>Envio para Grupos Concluído</b> 」 ❑\n` +
-        `│ 🏘 Total: <code>${ulist.length}</code>\n` +
+        `│ 🏘 Total: <code>${total}</code>\n` +
         `│ ✅ Enviados: <code>${success}</code>\n` +
         `│ 🗑 Removidos (inativos): <code>${removed}</code>\n` +
         `│ ❌ Falhas: <code>${failed}</code>\n` +
@@ -758,8 +888,7 @@ async function sendAdsToUsers() {
         try {
             const link = randomItem(adsterra.links);
             const tpl = randomItem(adsterra.userTemplates);
-            await bot.sendMessage(user_id, tpl.text, {
-                parse_mode: "HTML",
+            await safeSendMessage(user_id, tpl.text, {
                 disable_web_page_preview: true,
                 reply_markup: { inline_keyboard: [[{ text: tpl.buttonText, url: link }]] },
             });
@@ -797,8 +926,7 @@ async function sendAdsToGroups() {
         try {
             const link = randomItem(adsterra.links);
             const tpl = randomItem(adsterra.groupTemplates);
-            await bot.sendMessage(chatId, tpl.text, {
-                parse_mode: "HTML",
+            await safeSendMessage(chatId, tpl.text, {
                 disable_web_page_preview: true,
                 reply_markup: { inline_keyboard: [[{ text: tpl.buttonText, url: link }]] },
             });
@@ -944,9 +1072,84 @@ function registerCallbackHandler() {
     });
 }
 
+async function updateUserLanguage(userId, langCode) {
+    await UserModel.findOneAndUpdate(
+        { user_id: userId },
+        { $set: { lang_code: langCode } }
+    ).catch(() => {});
+}
+
+async function updateGroupLanguage(chatId, langCode) {
+    await ChatModel.findOneAndUpdate(
+        { chatId },
+        { $set: { lang_code: langCode } }
+    ).catch(() => {});
+}
+
+async function migrateUsersLangCode() {
+    // Verifica se migração está habilitada
+    if (process.env.ENABLE_LANG_MIGRATION !== 'true') {
+        console.log("⚠️ Migração de lang_code desabilitada. Use ENABLE_LANG_MIGRATION=true para ativar.");
+        return;
+    }
+    
+    const usersWithoutLang = await UserModel.find({ lang_code: "unknown" });
+    console.log(`Migrando ${usersWithoutLang.length} usuários para adicionar lang_code...`);
+    
+    for (const user of usersWithoutLang) {
+        try {
+            const chatInfo = await bot.getChat(user.user_id);
+            const langCode = chatInfo?.language_code || "unknown";
+            await updateUserLanguage(user.user_id, langCode);
+            console.log(`Usuário ${user.user_id} migrado: ${langCode}`);
+        } catch (err) {
+            console.error(`Erro ao migrar usuário ${user.user_id}:`, err.message);
+        }
+        await delay(50);
+    }
+    console.log("✅ Migração de usuários concluída!");
+}
+
+async function migrateGroupsLangCode() {
+    // Verifica se migração está habilitada
+    if (process.env.ENABLE_LANG_MIGRATION !== 'true') {
+        console.log("⚠️ Migração de lang_code desabilitada. Use ENABLE_LANG_MIGRATION=true para ativar.");
+        return;
+    }
+    
+    const groupsWithoutLang = await ChatModel.find({ lang_code: "unknown" });
+    console.log(`Migrando ${groupsWithoutLang.length} grupos para adicionar lang_code...`);
+    
+    for (const group of groupsWithoutLang) {
+        try {
+            const chatInfo = await bot.getChat(group.chatId);
+            const langCode = chatInfo?.language_code || "unknown";
+            await updateGroupLanguage(group.chatId, langCode);
+            console.log(`Grupo ${group.chatId} migrado: ${langCode}`);
+        } catch (err) {
+            console.error(`Erro ao migrar grupo ${group.chatId}:`, err.message);
+        }
+        await delay(50);
+    }
+    console.log("✅ Migração de grupos concluída!");
+}
+
+// ─── exports ──────────────────────────────────────────────────────────────────
+
 // ─── exports ──────────────────────────────────────────────────────────────────
 
 exports.initHandler = () => {
+    // Migração inicial de lang_code (apenas se habilitado)
+    if (process.env.ENABLE_LANG_MIGRATION === 'true') {
+        setTimeout(() => {
+            migrateUsersLangCode();
+            migrateGroupsLangCode();
+        }, 30000); // Espera 30 segundos para o bot iniciar completamente
+    } else {
+        console.log("⚠️ Migração de lang_code desabilitada na inicialização.");
+        console.log("   Para ativar, defina ENABLE_LANG_MIGRATION=true no arquivo .env");
+    }
+
     registerCallbackHandler();
 
     bot.on("message", main);
@@ -988,6 +1191,16 @@ exports.initHandler = () => {
     // Ads para grupos: todo dia às 12h e 20h
     new CronJob("0 0 12 * * *", sendAdsToGroups, null, true, "America/Sao_Paulo");
     new CronJob("0 0 20 * * *", sendAdsToGroups, null, true, "America/Sao_Paulo");
+
+    // Sistema de auto-recuperação a cada 5 minutos
+    new CronJob("0 */5 * * * *", async () => {
+        const memoryUsage = process.memoryUsage();
+        if (memoryUsage.heapUsed > 500 * 1024 * 1024) { // 500MB
+            console.log("🧹 Limpeza de memória iniciada...");
+            global.gc && global.gc();
+            console.log("✅ Memória otimizada");
+        }
+    }, null, true, "America/Sao_Paulo");
 
     sendBotOnlineMessage();
 };
