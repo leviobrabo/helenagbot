@@ -385,31 +385,24 @@ async function saveNewChatMembers(msg) {
   const chatId = msg.chat.id;
   const chatName = msg.chat.title;
   const chatType = msg.chat.type || "unknown";
+  const langCode = inferGroupLangCode(msg);
 
   try {
-    const chat = await ChatModel.findOne({ chatId }).catch(err => {
-      console.error(`[CHAT-FIND] Erro ao procurar grupo ${chatId}:`, err.message);
-      throw err;
-    });
+    const chat = await ChatModel.findOneAndUpdate(
+      { chatId },
+      {
+        $setOnInsert: { is_ban: false, lang_code: langCode },
+        $set: { chatName: chatName || `Group-${chatId}`, chat_type: chatType },
+      },
+      { upsert: true, new: true }
+    );
 
-    if (chat) {
-      if (chat.is_ban) {
-        await bot.leaveChat(chatId);
-      } else {
-        await ChatModel.findOneAndUpdate(
-          { chatId },
-          { chatName: chatName || chat.chatName, chat_type: chatType }
-        ).catch(() => {});
-      }
+    if (chat.is_ban) {
+      await bot.leaveChat(chatId);
       return;
     }
 
-    const created = await ChatModel.create({ chatId, chatName, chat_type: chatType, lang_code: "unknown" }).catch(err => {
-      console.error(`[CHAT-CREATE] Erro ao criar grupo ${chatId}:`, err.message);
-      throw err;
-    });
-    console.log(`[CHAT-CREATE] Grupo criado: ${chatId} - ${chatName} [${chatType}]`);
-
+    const isNew = chat.wasNew;
     const botUser = await bot.getMe();
     const addedNow = msg.new_chat_members?.some((m) => m.id === botUser.id);
     const chatLink = msg.chat.username ? `@${msg.chat.username}` : "Private Group";
@@ -417,7 +410,7 @@ async function saveNewChatMembers(msg) {
     if (addedNow) {
       const notif =
         `#Togurosbot #New_Group\n` +
-        `<b>Group:</b> ${chatName}\n` +
+        `<b>Group:</b> ${chat.chatName}\n` +
         `<b>ID:</b> <code>${chatId}</code>\n` +
         `<b>Type:</b> <code>${chatType}</code>\n` +
         `<b>Link:</b> ${chatLink}`;
@@ -514,28 +507,21 @@ async function ensureGroupSaved(msg) {
   const langCode = inferGroupLangCode(msg);
 
   try {
-    const exists = await ChatModel.findOne({ chatId });
+    const result = await ChatModel.findOneAndUpdate(
+      { chatId },
+      {
+        $setOnInsert: { is_ban: false, lang_code: langCode },
+        $set: { chatName, chat_type: chatType },
+      },
+      { upsert: true, new: true }
+    );
 
-    if (exists) {
-      if (exists.is_ban) return false;
+    if (result.is_ban) return false;
 
-      const updateFields = { chatName, chat_type: chatType };
-      if (langCode !== "unknown" && exists.lang_code === "unknown") {
-        updateFields.lang_code = langCode;
-      }
-
-      await ChatModel.findOneAndUpdate({ chatId }, { $set: updateFields });
-      return true;
+    if (langCode !== "unknown" && result.lang_code === "unknown") {
+      await ChatModel.updateOne({ chatId }, { $set: { lang_code: langCode } }).catch(() => {});
     }
 
-    await ChatModel.create({
-      chatId,
-      chatName,
-      chat_type: chatType,
-      lang_code: langCode,
-      is_ban: false
-    });
-    console.log(`[ENSURE-GROUP] Novo grupo salvo: ${chatId} (${chatName}) [${chatType}] lang=${langCode}`);
     return true;
   } catch (err) {
     console.error(`[ENSURE-GROUP-ERROR] Falha ao salvar grupo ${chatId}:`, err.message);
