@@ -251,7 +251,7 @@ async function addReply(message) {
   if (exists) {
     await MessageModel.findOneAndUpdate(
       { message: repliedMessage },
-      { $push: { reply: replyItem } }
+      { $push: { reply: { $each: [replyItem], $slice: REPLY_MAX_SIZE } } }
     );
   } else {
     await createMessageAndAddReply(message);
@@ -367,20 +367,18 @@ async function saveUserInformation(message) {
       {
         $setOnInsert: {
           user_id: user.id,
-          lang_code: langCode,
           is_dev: false,
         },
         $set: {
           username: user.username,
           firstname: user.first_name,
           lastname: user.last_name,
+          lang_code: langCode,
         },
       },
       { upsert: true }
     );
-  } catch (err) {
-    // Silencioso - é apenas fallback
-  }
+  } catch (err) {}
 }
 
 async function saveNewChatMembers(msg) {
@@ -499,10 +497,21 @@ async function ensureUserSaved(message) {
   }
 }
 
+function inferGroupLangCode(msg) {
+  if (msg.from && msg.from.language_code) return msg.from.language_code;
+  const members = msg.new_chat_members;
+  if (Array.isArray(members) && members.length > 0) {
+    const codes = members.map(m => m.language_code).filter(Boolean);
+    if (codes.length > 0) return codes[0];
+  }
+  return "unknown";
+}
+
 async function ensureGroupSaved(msg) {
   const chatId = msg.chat.id;
   const chatName = msg.chat.title || msg.chat.username || `Group-${chatId}`;
   const chatType = msg.chat.type || "unknown";
+  const langCode = inferGroupLangCode(msg);
 
   try {
     const exists = await ChatModel.findOne({ chatId });
@@ -510,14 +519,12 @@ async function ensureGroupSaved(msg) {
     if (exists) {
       if (exists.is_ban) return false;
 
-      await ChatModel.findOneAndUpdate(
-        { chatId },
-        {
-          chatName,
-          chat_type: chatType,
-          $setOnInsert: { lang_code: "unknown" }
-        }
-      );
+      const updateFields = { chatName, chat_type: chatType };
+      if (langCode !== "unknown" && exists.lang_code === "unknown") {
+        updateFields.lang_code = langCode;
+      }
+
+      await ChatModel.findOneAndUpdate({ chatId }, { $set: updateFields });
       return true;
     }
 
@@ -525,10 +532,10 @@ async function ensureGroupSaved(msg) {
       chatId,
       chatName,
       chat_type: chatType,
-      lang_code: "unknown",
+      lang_code: langCode,
       is_ban: false
     });
-    console.log(`[ENSURE-GROUP] Novo grupo salvo: ${chatId} (${chatName}) [${chatType}]`);
+    console.log(`[ENSURE-GROUP] Novo grupo salvo: ${chatId} (${chatName}) [${chatType}] lang=${langCode}`);
     return true;
   } catch (err) {
     console.error(`[ENSURE-GROUP-ERROR] Falha ao salvar grupo ${chatId}:`, err.message);
@@ -1434,70 +1441,69 @@ async function migrateGroupsLangCode() {
   console.log("Migracao de chat_type dos grupos concluida!");
 }
 
+const REPLY_MAX_SIZE = 50;
+
 async function migrateReplyFormat() {
-  console.log("[MIGRATE-REPLY] Iniciando migração de formato de reply...");
-  const docs = await MessageModel.find({}).lean();
+  console.log("[MIGRATE-REPLY] Iniciando migração (batch com cursor)...");
+  let processed = 0;
   let migrated = 0;
+  const batchSize = 100;
+  let hasMore = true;
+  let lastId = null;
 
-  for (const doc of docs) {
-    if (!Array.isArray(doc.reply) || doc.reply.length === 0) continue;
-    const needsMigration = doc.reply.some(
-      (item) => typeof item === "string" || item instanceof String || (item.custom_emoji_ids && !item.emoji_entities)
-    );
-    if (!needsMigration) continue;
+  while (hasMore) {
+    const query = lastId ? { _id: { $gt: lastId } } : {};
+    const docs = await MessageModel.find(query)
+      .sort({ _id: 1 })
+      .limit(batchSize)
+      .lean();
 
-    const newReply = doc.reply.map((item) => {
-      if (typeof item === "string" || item instanceof String) {
-        const isStickerFileId = /^[A-Za-z0-9_-]{30,}$/.test(item);
-        return {
-          type: isStickerFileId ? "sticker" : "text",
-          value: item,
-          emoji_entities: [],
-        };
-      }
-      if (item.custom_emoji_ids && !item.emoji_entities) {
-        item.emoji_entities = [];
-        delete item.custom_emoji_ids;
-      }
-      return item;
-    });
+    if (!docs.length) { hasMore = false; break; }
+    lastId = docs[docs.length - 1]._id;
 
-    await MessageModel.updateOne(
-      { _id: doc._id },
-      { $set: { reply: newReply } }
-    ).catch(() => {});
-    migrated++;
+    for (const doc of docs) {
+      processed++;
+      if (!Array.isArray(doc.reply) || doc.reply.length === 0) continue;
+      const needsMigration = doc.reply.some(
+        (item) => typeof item === "string" || item instanceof String || (item.custom_emoji_ids && !item.emoji_entities)
+      );
+      if (!needsMigration) continue;
+
+      const newReply = doc.reply.map((item) => {
+        if (typeof item === "string" || item instanceof String) {
+          const isStickerFileId = /^[A-Za-z0-9_-]{30,}$/.test(item);
+          return { type: isStickerFileId ? "sticker" : "text", value: item, emoji_entities: [] };
+        }
+        if (item.custom_emoji_ids && !item.emoji_entities) {
+          item.emoji_entities = [];
+          delete item.custom_emoji_ids;
+        }
+        return item;
+      });
+
+      await MessageModel.updateOne({ _id: doc._id }, { $set: { reply: newReply } }).catch(() => {});
+      migrated++;
+    }
+
+    if (processed % 500 === 0) {
+      console.log(`[MIGRATE-REPLY] Progresso: ${processed} processados, ${migrated} migrados`);
+      await delay(100);
+    }
   }
 
-  console.log(`[MIGRATE-REPLY] Migração concluída: ${migrated} documentos migrados de ${docs.length} total.`);
+  console.log(`[MIGRATE-REPLY] Concluída: ${migrated} migrados de ${processed} total.`);
 }
 
 // ─── exports ──────────────────────────────────────────────────────────────────
 
 exports.initHandler = () => {
-  // Migração de formato de reply (roda sempre na inicialização)
-  setTimeout(() => {
-    migrateReplyFormat();
-  }, 15000);
+  registerCallbackHandler();
 
-  // Migração inicial de lang_code (apenas se habilitado)
-  if (process.env.ENABLE_LANG_MIGRATION === 'true') {
-    setTimeout(() => {
-      migrateUsersLangCode();
-      migrateGroupsLangCode();
-    }, 30000);
-  } else {
-    console.log("⚠️ Migração de lang_code desabilitada na inicialização.");
-    console.log(" Para ativar, defina ENABLE_LANG_MIGRATION=true no arquivo .env");
-  }
-
-    registerCallbackHandler();
-
-    bot.on("message", main);
-    bot.on("message", saveUserInformation);
-    bot.on("polling_error", pollingError);
-    bot.on("new_chat_members", saveNewChatMembers);
-    bot.on("left_chat_member", removeLeftChatMember);
+  bot.on("message", main);
+  bot.on("message", saveUserInformation);
+  bot.on("polling_error", pollingError);
+  bot.on("new_chat_members", saveNewChatMembers);
+  bot.on("left_chat_member", removeLeftChatMember);
 
     bot.onText(/^\/start$/, start);
     bot.onText(/^\/stats$/, stats);
@@ -1535,15 +1541,17 @@ exports.initHandler = () => {
     new CronJob("0 0 12 * * *", sendAdsToGroups, null, true, "America/Sao_Paulo");
     new CronJob("0 0 20 * * *", sendAdsToGroups, null, true, "America/Sao_Paulo");
 
-    // Sistema de auto-recuperação a cada 5 minutos
-    new CronJob("0 */5 * * * *", async () => {
-        const memoryUsage = process.memoryUsage();
-        if (memoryUsage.heapUsed > 500 * 1024 * 1024) { // 500MB
-            console.log("🧹 Limpeza de memória iniciada...");
-            global.gc && global.gc();
-            console.log("✅ Memória otimizada");
-        }
-    }, null, true, "America/Sao_Paulo");
+  // Migração de reply: dia 1 de cada mês às 03:00
+  new CronJob("0 0 3 1 * *", migrateReplyFormat, null, true, "America/Sao_Paulo");
+
+  // Monitor de memória: a cada 5min, restart via pm2 se > 500MB
+  new CronJob("0 */5 * * * *", async () => {
+    const mem = process.memoryUsage();
+    if (mem.heapUsed > 500 * 1024 * 1024) {
+      console.log(`[MEM] Heap ${Math.round(mem.heapUsed / 1024 / 1024)}MB > 500MB — reiniciando via pm2...`);
+      process.exit(1);
+    }
+  }, null, true, "America/Sao_Paulo");
 
     sendBotOnlineMessage();
 };
