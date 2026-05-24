@@ -55,7 +55,57 @@ function sanitizeHTML(text) {
 }
 
 function randomItem(arr) {
-    return arr[Math.floor(Math.random() * arr.length)];
+  return arr[Math.floor(Math.random() * arr.length)];
+}
+
+function extractEmojiEntities(entities) {
+  if (!Array.isArray(entities)) return [];
+  return entities
+    .filter((e) => e.type === "custom_emoji" && e.custom_emoji_id)
+    .map((e) => ({
+      offset: e.offset,
+      length: e.length || 2,
+      custom_emoji_id: e.custom_emoji_id,
+    }));
+}
+
+function buildReplyItem(message) {
+  if (message.sticker) {
+    return { type: "sticker", value: message.sticker.file_id, emoji_entities: [] };
+  }
+  const emojiEntities = extractEmojiEntities(message.entities);
+  const text = message.text || "";
+  if (emojiEntities.length > 0) {
+    return { type: "custom_emoji", value: text, emoji_entities: emojiEntities };
+  }
+  return { type: "text", value: text, emoji_entities: [] };
+}
+
+function buildMessageKey(message) {
+  if (message.sticker) return message.sticker.file_unique_id;
+  return message.text || "";
+}
+
+function buildEntitiesFromStored(emojiEntities) {
+  if (!emojiEntities || !emojiEntities.length) return undefined;
+  return emojiEntities.map((e) => ({
+    offset: e.offset,
+    length: e.length,
+    type: "custom_emoji",
+    custom_emoji_id: e.custom_emoji_id,
+  }));
+}
+
+function normalizeReplyItem(item) {
+  if (typeof item === "string" || item instanceof String) {
+    const isStickerFileId = /^[A-Za-z0-9_-]{30,}$/.test(item);
+    return { type: isStickerFileId ? "sticker" : "text", value: item, emoji_entities: [] };
+  }
+  if (item.custom_emoji_ids && !item.emoji_entities) {
+    item.emoji_entities = [];
+  }
+  if (!item.emoji_entities) item.emoji_entities = [];
+  return item;
 }
 
 function chunkArray(arr, size) {
@@ -154,125 +204,137 @@ async function sendPaginated(chatId, userId, type, pages) {
 
 // ─── learning system ──────────────────────────────────────────────────────────
 
-async function deleteMessageIfExists(repliedMessage, replyMessage) {
-    const found = await MessageModel.findOne({
-        $or: [{ message: repliedMessage }, { reply: replyMessage }],
-    });
-    if (found) await MessageModel.deleteOne({ _id: found._id });
+async function deleteMessageIfExists(repliedMessage, replyValue) {
+  const found = await MessageModel.findOne({
+    $or: [{ message: repliedMessage }, { "reply.value": replyValue }],
+  });
+  if (found) await MessageModel.deleteOne({ _id: found._id });
 }
 
 async function createMessageAndAddReply(message) {
-    const repliedMessage =
-        message.reply_to_message?.sticker?.file_unique_id ?? message.reply_to_message?.text;
-    const replyMessage = message.sticker?.file_id ?? message.text;
+  const repliedMessage = message.reply_to_message
+    ? buildMessageKey(message.reply_to_message)
+    : null;
+  const replyItem = buildReplyItem(message);
 
-    if (!repliedMessage || !replyMessage) return;
-    if (/^[\/.!]/.test(repliedMessage) || /^[\/.!]/.test(replyMessage)) return;
-    if (containsUrl(repliedMessage) || containsUrl(replyMessage)) {
-        await deleteMessageIfExists(repliedMessage, replyMessage);
-        return;
-    }
-    if (hasForbiddenWord(repliedMessage) || hasForbiddenWord(replyMessage)) {
-        await deleteMessageIfExists(repliedMessage, replyMessage);
-        return;
-    }
+  if (!repliedMessage || !replyItem.value) return;
+  if (/^[\/.!]/.test(repliedMessage) || (/^[\/.!]/.test(replyItem.value) && replyItem.type === "text")) return;
+  if (containsUrl(repliedMessage) || (replyItem.type === "text" && containsUrl(replyItem.value))) {
+    await deleteMessageIfExists(repliedMessage, replyItem.value);
+    return;
+  }
+  if (hasForbiddenWord(repliedMessage) || (replyItem.type === "text" && hasForbiddenWord(replyItem.value))) {
+    await deleteMessageIfExists(repliedMessage, replyItem.value);
+    return;
+  }
 
-    await new MessageModel({ message: repliedMessage, reply: replyMessage }).save().catch(() => {});
+  await new MessageModel({ message: repliedMessage, reply: [replyItem] }).save().catch(() => {});
 }
 
 async function addReply(message) {
-    const repliedMessage =
-        message.reply_to_message?.sticker?.file_unique_id ?? message.reply_to_message?.text;
-    const replyMessage = message.sticker?.file_id ?? message.text;
+  const repliedMessage = message.reply_to_message
+    ? buildMessageKey(message.reply_to_message)
+    : null;
+  const replyItem = buildReplyItem(message);
 
-    if (/^[\/.!]/.test(repliedMessage)) return;
-    if (containsUrl(repliedMessage) || containsUrl(replyMessage)) {
-        await deleteMessageIfExists(repliedMessage, replyMessage);
-        return;
-    }
-    if (hasForbiddenWord(repliedMessage) || hasForbiddenWord(replyMessage)) {
-        await deleteMessageIfExists(repliedMessage, replyMessage);
-        return;
-    }
+  if (/^[\/.!]/.test(repliedMessage)) return;
+  if (containsUrl(repliedMessage) || (replyItem.type === "text" && containsUrl(replyItem.value))) {
+    await deleteMessageIfExists(repliedMessage, replyItem.value);
+    return;
+  }
+  if (hasForbiddenWord(repliedMessage) || (replyItem.type === "text" && hasForbiddenWord(replyItem.value))) {
+    await deleteMessageIfExists(repliedMessage, replyItem.value);
+    return;
+  }
 
-    const exists = await MessageModel.exists({ message: repliedMessage });
-    if (exists) {
-        await MessageModel.findOneAndUpdate(
-            { message: repliedMessage },
-            { $push: { reply: replyMessage } }
-        );
-    } else {
-        await createMessageAndAddReply(message);
-    }
+  const exists = await MessageModel.exists({ message: repliedMessage });
+  if (exists) {
+    await MessageModel.findOneAndUpdate(
+      { message: repliedMessage },
+      { $push: { reply: replyItem } }
+    );
+  } else {
+    await createMessageAndAddReply(message);
+  }
 }
 
 // ─── answer user ──────────────────────────────────────────────────────────────
 
 async function answerUser(message) {
-    const received = message.sticker?.file_unique_id ?? message.text;
-    const chatId = message.chat.id;
-    const isGroup = message.chat.type === "group" || message.chat.type === "supergroup";
+  const received = buildMessageKey(message);
+  const chatId = message.chat.id;
+  const isGroup = message.chat.type === "group" || message.chat.type === "supergroup";
 
-    // Garantir que grupo seja salvo (se não for PV)
-    if (isGroup) {
-        const groupSaved = await ensureGroupSaved(message);
-        if (!groupSaved) return; // Grupo banido ou erro
+  if (isGroup) {
+    const groupSaved = await ensureGroupSaved(message);
+    if (!groupSaved) return;
+  }
+
+  try {
+    if (/^[\/.!]/.test(received)) return;
+
+    const sendOpts = { reply_to_message_id: message.message_id };
+
+    const audioMatch = audioList.find((a) => received === a.keyword);
+    if (audioMatch) {
+      await bot.sendChatAction(chatId, "record_audio");
+      await Promise.race([
+        safeSendAudio(chatId, audioMatch.audioUrl, sendOpts),
+        new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), 6000)),
+      ]).catch((e) => console.error("Audio error:", e.message));
+      return;
     }
 
-    try {
-        if (/^[\/.!]/.test(received)) return;
-
-        const sendOpts = { reply_to_message_id: message.message_id };
-
-        const audioMatch = audioList.find((a) => received === a.keyword);
-        if (audioMatch) {
-            await bot.sendChatAction(chatId, "record_audio");
-            await Promise.race([
-                safeSendAudio(chatId, audioMatch.audioUrl, sendOpts),
-                new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), 6000)),
-            ]).catch((e) => console.error("Audio error:", e.message));
-            return;
-        }
-
-        const photoMatch = photoList.find((p) => received === p.keyword);
-        if (photoMatch) {
-            await bot.sendChatAction(chatId, "upload_photo");
-            await Promise.race([
-                safeSendPhoto(chatId, photoMatch.photoUrl, sendOpts),
-                new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), 6000)),
-            ]).catch((e) => console.error("Photo error:", e.message));
-            return;
-        }
-
-        const doc = await MessageModel.findOne({ message: received });
-        if (doc && doc.reply.length) {
-            const replyToSend = randomItem(doc.reply);
-            if (!replyToSend) return;
-            const typingTime = Math.min(Math.max(50 * replyToSend.length, 200), 6000);
-            await bot.sendChatAction(chatId, "typing");
-            await delay(typingTime);
-            
-            // Verifica permissões antes de enviar
-            try {
-                await bot.sendMessage(chatId, replyToSend, {
-                    reply_to_message_id: message.message_id,
-                    disable_web_page_preview: true
-                });
-            } catch (err) {
-                if (err.message?.includes("CHAT_SEND_AUDIOS_FORBIDDEN")) {
-                    console.error("Permissão negada para enviar mensagem no chat:", chatId);
-                } else {
-                    await bot.sendSticker(chatId, replyToSend, sendOpts).catch(() => {});
-                }
-            }
-        }
-    } catch (error) {
-        const code = error?.response?.body?.error_code;
-        if (error.message?.includes("CHAT_WRITE_FORBIDDEN") || code === 403) {
-            await bot.leaveChat(chatId).catch(() => {});
-            await ChatModel.deleteOne({ chatId }).catch(() => {});
-        }
+    const photoMatch = photoList.find((p) => received === p.keyword);
+    if (photoMatch) {
+      await bot.sendChatAction(chatId, "upload_photo");
+      await Promise.race([
+        safeSendPhoto(chatId, photoMatch.photoUrl, sendOpts),
+        new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), 6000)),
+      ]).catch((e) => console.error("Photo error:", e.message));
+      return;
     }
+
+    const doc = await MessageModel.findOne({ message: received });
+    if (doc && doc.reply.length) {
+      const rawReply = randomItem(doc.reply);
+      const replyItem = normalizeReplyItem(rawReply);
+      if (!replyItem || !replyItem.value) return;
+
+      const typingTime = Math.min(Math.max(50 * replyItem.value.length, 200), 6000);
+      await bot.sendChatAction(chatId, "typing");
+      await delay(typingTime);
+
+      if (replyItem.type === "sticker") {
+        await bot.sendSticker(chatId, replyItem.value, sendOpts).catch((err) => {
+          console.error("Sticker send error:", err.message);
+        });
+      } else if (replyItem.type === "custom_emoji" && replyItem.emoji_entities?.length > 0) {
+        await bot.sendMessage(chatId, replyItem.value, {
+          reply_to_message_id: message.message_id,
+          disable_web_page_preview: true,
+          entities: buildEntitiesFromStored(replyItem.emoji_entities),
+        }).catch(async (err) => {
+          console.error("Custom emoji send error:", err.message);
+          await bot.sendMessage(chatId, replyItem.value, {
+            reply_to_message_id: message.message_id,
+            disable_web_page_preview: true,
+          }).catch(() => {});
+        });
+      } else {
+        await bot.sendMessage(chatId, replyItem.value, {
+          reply_to_message_id: message.message_id,
+          disable_web_page_preview: true,
+        }).catch(() => {});
+      }
+    }
+  } catch (error) {
+    const code = error?.response?.body?.error_code;
+    if (error.message?.includes("CHAT_WRITE_FORBIDDEN") || code === 403) {
+      await bot.leaveChat(chatId).catch(() => {});
+      await ChatModel.deleteOne({ chatId }).catch(() => {});
+    }
+  }
 }
 
 // ─── main message handler ─────────────────────────────────────────────────────
@@ -724,33 +786,33 @@ async function unban(message) {
 // ─── /delmsg ──────────────────────────────────────────────────────────────────
 
 async function removeMessage(message) {
-    if (!is_dev(message.from.id)) return;
+  if (!is_dev(message.from.id)) return;
 
-    const repliedMessage =
-        message.reply_to_message &&
-        (message.reply_to_message.sticker?.file_unique_id ?? message.reply_to_message.text);
+  const repliedMessage = message.reply_to_message
+    ? buildMessageKey(message.reply_to_message)
+    : null;
 
-    if (!repliedMessage) {
-        return bot.sendMessage(message.chat.id, "Responda a uma mensagem para deletar do banco.");
-    }
+  if (!repliedMessage) {
+    return bot.sendMessage(message.chat.id, "Responda a uma mensagem para deletar do banco.");
+  }
 
-    const exists = await MessageModel.exists({ message: repliedMessage });
-    if (!exists) {
-        return bot.sendMessage(message.chat.id, "Mensagem não encontrada no banco de dados.");
-    }
+  const exists = await MessageModel.exists({ message: repliedMessage });
+  if (!exists) {
+    return bot.sendMessage(message.chat.id, "Mensagem não encontrada no banco de dados.");
+  }
 
-    await MessageModel.deleteMany({
-        $or: [
-            { message: repliedMessage },
-            { reply: { $elemMatch: { $eq: repliedMessage } } },
-        ],
-    });
+  await MessageModel.deleteMany({
+    $or: [
+      { message: repliedMessage },
+      { "reply.value": repliedMessage },
+    ],
+  });
 
-    bot.sendMessage(
-        message.chat.id,
-        `✅ Deletado por <a href="tg://user?id=${message.from.id}">${message.from.first_name}</a>.\n\nTodas as respostas associadas foram apagadas.`,
-        { parse_mode: "HTML", reply_to_message_id: message.message_id }
-    );
+  bot.sendMessage(
+    message.chat.id,
+    `✅ Deletado por <a href="tg://user?id=${message.from.id}">${message.from.first_name}</a>.\n\nTodas as respostas associadas foram apagadas.`,
+    { parse_mode: "HTML", reply_to_message_id: message.message_id }
+  );
 }
 
 // ─── /devs ────────────────────────────────────────────────────────────────────
@@ -1372,19 +1434,62 @@ async function migrateGroupsLangCode() {
   console.log("Migracao de chat_type dos grupos concluida!");
 }
 
+async function migrateReplyFormat() {
+  console.log("[MIGRATE-REPLY] Iniciando migração de formato de reply...");
+  const docs = await MessageModel.find({}).lean();
+  let migrated = 0;
+
+  for (const doc of docs) {
+    if (!Array.isArray(doc.reply) || doc.reply.length === 0) continue;
+    const needsMigration = doc.reply.some(
+      (item) => typeof item === "string" || item instanceof String || (item.custom_emoji_ids && !item.emoji_entities)
+    );
+    if (!needsMigration) continue;
+
+    const newReply = doc.reply.map((item) => {
+      if (typeof item === "string" || item instanceof String) {
+        const isStickerFileId = /^[A-Za-z0-9_-]{30,}$/.test(item);
+        return {
+          type: isStickerFileId ? "sticker" : "text",
+          value: item,
+          emoji_entities: [],
+        };
+      }
+      if (item.custom_emoji_ids && !item.emoji_entities) {
+        item.emoji_entities = [];
+        delete item.custom_emoji_ids;
+      }
+      return item;
+    });
+
+    await MessageModel.updateOne(
+      { _id: doc._id },
+      { $set: { reply: newReply } }
+    ).catch(() => {});
+    migrated++;
+  }
+
+  console.log(`[MIGRATE-REPLY] Migração concluída: ${migrated} documentos migrados de ${docs.length} total.`);
+}
+
 // ─── exports ──────────────────────────────────────────────────────────────────
 
 exports.initHandler = () => {
-    // Migração inicial de lang_code (apenas se habilitado)
-    if (process.env.ENABLE_LANG_MIGRATION === 'true') {
-        setTimeout(() => {
-            migrateUsersLangCode();
-            migrateGroupsLangCode();
-        }, 30000); // Espera 30 segundos para o bot iniciar completamente
-    } else {
-        console.log("⚠️ Migração de lang_code desabilitada na inicialização.");
-        console.log("   Para ativar, defina ENABLE_LANG_MIGRATION=true no arquivo .env");
-    }
+  // Migração de formato de reply (roda sempre na inicialização)
+  setTimeout(() => {
+    migrateReplyFormat();
+  }, 15000);
+
+  // Migração inicial de lang_code (apenas se habilitado)
+  if (process.env.ENABLE_LANG_MIGRATION === 'true') {
+    setTimeout(() => {
+      migrateUsersLangCode();
+      migrateGroupsLangCode();
+    }, 30000);
+  } else {
+    console.log("⚠️ Migração de lang_code desabilitada na inicialização.");
+    console.log(" Para ativar, defina ENABLE_LANG_MIGRATION=true no arquivo .env");
+  }
 
     registerCallbackHandler();
 
