@@ -68,21 +68,6 @@ function timeFormatter(seconds) {
     return `${h}:${m}:${s}`;
 }
 
-function escapeHTML(text) {
-  if (typeof text !== 'string') return '';
-  return text
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
-}
-
-function sanitizeHTML(text) {
-    if (typeof text !== 'string') return '';
-    return text
-        .replace(/[^\w\s\-.,:;!?'"@#$%^&*()+=\[\]{}|<>~`\/]/g, '')
-        .replace(/[\u0000-\u001F\u007F-\u009F]/g, '');
-}
-
 function randomItem(arr) {
   return arr[Math.floor(Math.random() * arr.length)];
 }
@@ -163,13 +148,12 @@ async function retryWithBackoff(fn, maxRetries = 3, delayMs = 1000) {
 }
 
 function safeSendMessage(chatId, text, options = {}) {
-    return retryWithBackoff(async () => {
-        const sanitizedText = sanitizeHTML(text);
-        return await bot.sendMessage(chatId, sanitizedText, {
-            ...options,
-            parse_mode: options.parse_mode || "HTML"
-        });
+  return retryWithBackoff(async () => {
+    return await bot.sendMessage(chatId, text, {
+      ...options,
+      parse_mode: options.parse_mode || "HTML"
     });
+  });
 }
 
 function safeSendAudio(chatId, audioUrl, options = {}) {

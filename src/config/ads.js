@@ -20,7 +20,7 @@ const userTemplates = [
   {
     text: `🔥 <b>ATENÇÃO: R$547 por dia — vem ver!</b>
 
-Você sabia que dá pra ganhar R$547 por dia lavorando em casa?
+Você sabia que dá pra ganhar R$547 por dia trabalhando em casa?
 Milhares de brasileiros já estão fazendo isso HOJE.
 
 👉 <a href="https://t.me/lbrabo">Canal de Novidades</a> | <a href="https://t.me/cursobroff">Cursos</a>`,
@@ -38,7 +38,7 @@ Não fica pensando — clica logo abaixo! 🚀`,
   {
     text: `💰 <b>Como ganhar R$547 POR DIA?</b>
 
-A resposta tá num click! Método testado e aprovado
+A resposta tá num clique! Método testado e aprovado
 por milhares de brasileiros comuns como você.
 
 👉 <a href="https://t.me/lbrabo">Segue o canal</a> | <a href="https://t.me/cursobroff">Cursos</a>`,
@@ -132,7 +132,7 @@ Bora entrar nessa too?
     text: `⚡ <b>Fica ligado, galera!</b>
 
 Oportunidade boa na área!
-Clica abaixo e descubre como!
+Clica abaixo e descubra como!
 
 📚 <a href="https://t.me/cursobroff">Cursos</a> | 📣 <a href="https://t.me/lbrabo">Canal</a>`,
     buttonText: "🚀 VER COMO É!",
