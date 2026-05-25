@@ -315,16 +315,16 @@ async function answerUser(message) {
       const replyItem = normalizeReplyItem(rawReply);
       if (!replyItem || !replyItem.value) return;
 
+      console.log(`[SEND] type=${replyItem.type} chatId=${chatId}`);
+
       const typingTime = Math.min(Math.max(50 * replyItem.value.length, 200), 6000);
       await bot.sendChatAction(chatId, "typing").catch(() => {});
       await delay(typingTime);
 
       if (replyItem.type === "sticker") {
         await bot.sendSticker(chatId, replyItem.value, sendOpts).catch((err) => {
-          if (!err.message?.includes("message to be replied")) {
-            console.warn("[STICKER-WARN]", err.message);
-          }
-          return bot.sendSticker(chatId, replyItem.value).catch(() => {});
+          console.warn("[STICKER-WARN]", err.message);
+          return bot.sendSticker(chatId, replyItem.value).catch((e) => console.warn("[STICKER-FALLBACK]", e.message));
         });
       } else if (replyItem.type === "custom_emoji" && replyItem.emoji_entities?.length > 0) {
         await bot.sendMessage(chatId, replyItem.value, {
@@ -334,15 +334,19 @@ async function answerUser(message) {
         }).catch(async (err) => {
           console.warn("[EMOJI-WARN]", err.message);
           await bot.sendMessage(chatId, replyItem.value, {
-            ...sendOpts,
             disable_web_page_preview: true,
-          }).catch(() => {});
+          }).catch((e) => console.warn("[EMOJI-FALLBACK]", e.message));
         });
       } else {
         await bot.sendMessage(chatId, replyItem.value, {
           ...sendOpts,
           disable_web_page_preview: true,
-        }).catch(() => {});
+        }).catch(async (err) => {
+          console.warn("[TEXT-WARN]", err.message);
+          await bot.sendMessage(chatId, replyItem.value, {
+            disable_web_page_preview: true,
+          }).catch((e) => console.warn("[TEXT-FALLBACK]", e.message));
+        });
       }
     }
   } catch (error) {
