@@ -309,6 +309,7 @@ async function answerUser(message) {
     }
 
     const doc = await MessageModel.findOne({ message: received });
+    console.log(`[ANSWER] received="${received.slice(0,50)}" doc=${doc ? `found(replies=${doc.reply.length})` : "null"}`);
     if (doc && doc.reply.length) {
       const rawReply = randomItem(doc.reply);
       const replyItem = normalizeReplyItem(rawReply);
@@ -356,17 +357,20 @@ async function answerUser(message) {
 // ─── main message handler ─────────────────────────────────────────────────────
 
 async function main(message) {
-    const replyTo = message?.reply_to_message ?? false;
-    const botId = await getBotId();
+    try {
+        const replyTo = message?.reply_to_message ?? false;
+        const botId = await getBotId();
 
-    // Garantir que usuário em PV seja salvo
-    if (message.chat.type === "private") {
-        await ensureUserSaved(message);
-    }
+        if (message.chat.type === "private") {
+            await ensureUserSaved(message);
+        }
 
-    if (message.sticker || message.text) {
-        if (replyTo && replyTo.from.id !== botId) addReply(message);
-        if (!replyTo || replyTo.from.id === botId) answerUser(message);
+        if (message.sticker || message.text) {
+            if (replyTo && replyTo.from?.id !== botId) addReply(message);
+            if (!replyTo || replyTo.from?.id === botId) answerUser(message);
+        }
+    } catch (err) {
+        console.error("[MAIN-ERROR]", err.message);
     }
 }
 
