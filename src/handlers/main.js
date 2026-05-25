@@ -311,9 +311,14 @@ async function answerUser(message) {
     const doc = await MessageModel.findOne({ message: received });
     console.log(`[ANSWER] received="${received.slice(0,50)}" doc=${doc ? `found(replies=${doc.reply.length})` : "null"}`);
     if (doc && doc.reply.length) {
-      const rawReply = randomItem(doc.reply);
-      const replyItem = normalizeReplyItem(rawReply);
-      if (!replyItem || !replyItem.value) return;
+      const validReplies = doc.reply
+        .map(normalizeReplyItem)
+        .filter((r) => r && r.value);
+      if (!validReplies.length) {
+        console.log(`[SEND] SKIP: todos os replies vazios para "${received.slice(0, 30)}"`);
+        return;
+      }
+      const replyItem = randomItem(validReplies);
 
       console.log(`[SEND] type=${replyItem.type} chatId=${chatId}`);
 
