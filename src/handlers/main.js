@@ -55,7 +55,57 @@ function sanitizeHTML(text) {
 }
 
 function randomItem(arr) {
-    return arr[Math.floor(Math.random() * arr.length)];
+  return arr[Math.floor(Math.random() * arr.length)];
+}
+
+function extractEmojiEntities(entities) {
+  if (!Array.isArray(entities)) return [];
+  return entities
+    .filter((e) => e.type === "custom_emoji" && e.custom_emoji_id)
+    .map((e) => ({
+      offset: e.offset,
+      length: e.length || 2,
+      custom_emoji_id: e.custom_emoji_id,
+    }));
+}
+
+function buildReplyItem(message) {
+  if (message.sticker) {
+    return { type: "sticker", value: message.sticker.file_id, emoji_entities: [] };
+  }
+  const emojiEntities = extractEmojiEntities(message.entities);
+  const text = message.text || "";
+  if (emojiEntities.length > 0) {
+    return { type: "custom_emoji", value: text, emoji_entities: emojiEntities };
+  }
+  return { type: "text", value: text, emoji_entities: [] };
+}
+
+function buildMessageKey(message) {
+  if (message.sticker) return message.sticker.file_unique_id;
+  return message.text || "";
+}
+
+function buildEntitiesFromStored(emojiEntities) {
+  if (!emojiEntities || !emojiEntities.length) return undefined;
+  return emojiEntities.map((e) => ({
+    offset: e.offset,
+    length: e.length,
+    type: "custom_emoji",
+    custom_emoji_id: e.custom_emoji_id,
+  }));
+}
+
+function normalizeReplyItem(item) {
+  if (typeof item === "string" || item instanceof String) {
+    const isStickerFileId = /^[A-Za-z0-9_-]{30,}$/.test(item);
+    return { type: isStickerFileId ? "sticker" : "text", value: item, emoji_entities: [] };
+  }
+  if (item.custom_emoji_ids && !item.emoji_entities) {
+    item.emoji_entities = [];
+  }
+  if (!item.emoji_entities) item.emoji_entities = [];
+  return item;
 }
 
 function chunkArray(arr, size) {
@@ -154,125 +204,137 @@ async function sendPaginated(chatId, userId, type, pages) {
 
 // ─── learning system ──────────────────────────────────────────────────────────
 
-async function deleteMessageIfExists(repliedMessage, replyMessage) {
-    const found = await MessageModel.findOne({
-        $or: [{ message: repliedMessage }, { reply: replyMessage }],
-    });
-    if (found) await MessageModel.deleteOne({ _id: found._id });
+async function deleteMessageIfExists(repliedMessage, replyValue) {
+  const found = await MessageModel.findOne({
+    $or: [{ message: repliedMessage }, { "reply.value": replyValue }],
+  });
+  if (found) await MessageModel.deleteOne({ _id: found._id });
 }
 
 async function createMessageAndAddReply(message) {
-    const repliedMessage =
-        message.reply_to_message?.sticker?.file_unique_id ?? message.reply_to_message?.text;
-    const replyMessage = message.sticker?.file_id ?? message.text;
+  const repliedMessage = message.reply_to_message
+    ? buildMessageKey(message.reply_to_message)
+    : null;
+  const replyItem = buildReplyItem(message);
 
-    if (!repliedMessage || !replyMessage) return;
-    if (/^[\/.!]/.test(repliedMessage) || /^[\/.!]/.test(replyMessage)) return;
-    if (containsUrl(repliedMessage) || containsUrl(replyMessage)) {
-        await deleteMessageIfExists(repliedMessage, replyMessage);
-        return;
-    }
-    if (hasForbiddenWord(repliedMessage) || hasForbiddenWord(replyMessage)) {
-        await deleteMessageIfExists(repliedMessage, replyMessage);
-        return;
-    }
+  if (!repliedMessage || !replyItem.value) return;
+  if (/^[\/.!]/.test(repliedMessage) || (/^[\/.!]/.test(replyItem.value) && replyItem.type === "text")) return;
+  if (containsUrl(repliedMessage) || (replyItem.type === "text" && containsUrl(replyItem.value))) {
+    await deleteMessageIfExists(repliedMessage, replyItem.value);
+    return;
+  }
+  if (hasForbiddenWord(repliedMessage) || (replyItem.type === "text" && hasForbiddenWord(replyItem.value))) {
+    await deleteMessageIfExists(repliedMessage, replyItem.value);
+    return;
+  }
 
-    await new MessageModel({ message: repliedMessage, reply: replyMessage }).save().catch(() => {});
+  await new MessageModel({ message: repliedMessage, reply: [replyItem] }).save().catch(() => {});
 }
 
 async function addReply(message) {
-    const repliedMessage =
-        message.reply_to_message?.sticker?.file_unique_id ?? message.reply_to_message?.text;
-    const replyMessage = message.sticker?.file_id ?? message.text;
+  const repliedMessage = message.reply_to_message
+    ? buildMessageKey(message.reply_to_message)
+    : null;
+  const replyItem = buildReplyItem(message);
 
-    if (/^[\/.!]/.test(repliedMessage)) return;
-    if (containsUrl(repliedMessage) || containsUrl(replyMessage)) {
-        await deleteMessageIfExists(repliedMessage, replyMessage);
-        return;
-    }
-    if (hasForbiddenWord(repliedMessage) || hasForbiddenWord(replyMessage)) {
-        await deleteMessageIfExists(repliedMessage, replyMessage);
-        return;
-    }
+  if (/^[\/.!]/.test(repliedMessage)) return;
+  if (containsUrl(repliedMessage) || (replyItem.type === "text" && containsUrl(replyItem.value))) {
+    await deleteMessageIfExists(repliedMessage, replyItem.value);
+    return;
+  }
+  if (hasForbiddenWord(repliedMessage) || (replyItem.type === "text" && hasForbiddenWord(replyItem.value))) {
+    await deleteMessageIfExists(repliedMessage, replyItem.value);
+    return;
+  }
 
-    const exists = await MessageModel.exists({ message: repliedMessage });
-    if (exists) {
-        await MessageModel.findOneAndUpdate(
-            { message: repliedMessage },
-            { $push: { reply: replyMessage } }
-        );
-    } else {
-        await createMessageAndAddReply(message);
-    }
+  const exists = await MessageModel.exists({ message: repliedMessage });
+  if (exists) {
+    await MessageModel.findOneAndUpdate(
+      { message: repliedMessage },
+      { $push: { reply: { $each: [replyItem], $slice: REPLY_MAX_SIZE } } }
+    );
+  } else {
+    await createMessageAndAddReply(message);
+  }
 }
 
 // ─── answer user ──────────────────────────────────────────────────────────────
 
 async function answerUser(message) {
-    const received = message.sticker?.file_unique_id ?? message.text;
-    const chatId = message.chat.id;
-    const isGroup = message.chat.type === "group" || message.chat.type === "supergroup";
+  const received = buildMessageKey(message);
+  const chatId = message.chat.id;
+  const isGroup = message.chat.type === "group" || message.chat.type === "supergroup";
 
-    // Garantir que grupo seja salvo (se não for PV)
-    if (isGroup) {
-        const groupSaved = await ensureGroupSaved(message);
-        if (!groupSaved) return; // Grupo banido ou erro
+  if (isGroup) {
+    const groupSaved = await ensureGroupSaved(message);
+    if (!groupSaved) return;
+  }
+
+  try {
+    if (/^[\/.!]/.test(received)) return;
+
+    const sendOpts = { reply_to_message_id: message.message_id };
+
+    const audioMatch = audioList.find((a) => received === a.keyword);
+    if (audioMatch) {
+      await bot.sendChatAction(chatId, "record_audio");
+      await Promise.race([
+        safeSendAudio(chatId, audioMatch.audioUrl, sendOpts),
+        new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), 6000)),
+      ]).catch((e) => console.error("Audio error:", e.message));
+      return;
     }
 
-    try {
-        if (/^[\/.!]/.test(received)) return;
-
-        const sendOpts = { reply_to_message_id: message.message_id };
-
-        const audioMatch = audioList.find((a) => received === a.keyword);
-        if (audioMatch) {
-            await bot.sendChatAction(chatId, "record_audio");
-            await Promise.race([
-                safeSendAudio(chatId, audioMatch.audioUrl, sendOpts),
-                new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), 6000)),
-            ]).catch((e) => console.error("Audio error:", e.message));
-            return;
-        }
-
-        const photoMatch = photoList.find((p) => received === p.keyword);
-        if (photoMatch) {
-            await bot.sendChatAction(chatId, "upload_photo");
-            await Promise.race([
-                safeSendPhoto(chatId, photoMatch.photoUrl, sendOpts),
-                new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), 6000)),
-            ]).catch((e) => console.error("Photo error:", e.message));
-            return;
-        }
-
-        const doc = await MessageModel.findOne({ message: received });
-        if (doc && doc.reply.length) {
-            const replyToSend = randomItem(doc.reply);
-            if (!replyToSend) return;
-            const typingTime = Math.min(Math.max(50 * replyToSend.length, 200), 6000);
-            await bot.sendChatAction(chatId, "typing");
-            await delay(typingTime);
-            
-            // Verifica permissões antes de enviar
-            try {
-                await bot.sendMessage(chatId, replyToSend, {
-                    reply_to_message_id: message.message_id,
-                    disable_web_page_preview: true
-                });
-            } catch (err) {
-                if (err.message?.includes("CHAT_SEND_AUDIOS_FORBIDDEN")) {
-                    console.error("Permissão negada para enviar mensagem no chat:", chatId);
-                } else {
-                    await bot.sendSticker(chatId, replyToSend, sendOpts).catch(() => {});
-                }
-            }
-        }
-    } catch (error) {
-        const code = error?.response?.body?.error_code;
-        if (error.message?.includes("CHAT_WRITE_FORBIDDEN") || code === 403) {
-            await bot.leaveChat(chatId).catch(() => {});
-            await ChatModel.deleteOne({ chatId }).catch(() => {});
-        }
+    const photoMatch = photoList.find((p) => received === p.keyword);
+    if (photoMatch) {
+      await bot.sendChatAction(chatId, "upload_photo");
+      await Promise.race([
+        safeSendPhoto(chatId, photoMatch.photoUrl, sendOpts),
+        new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), 6000)),
+      ]).catch((e) => console.error("Photo error:", e.message));
+      return;
     }
+
+    const doc = await MessageModel.findOne({ message: received });
+    if (doc && doc.reply.length) {
+      const rawReply = randomItem(doc.reply);
+      const replyItem = normalizeReplyItem(rawReply);
+      if (!replyItem || !replyItem.value) return;
+
+      const typingTime = Math.min(Math.max(50 * replyItem.value.length, 200), 6000);
+      await bot.sendChatAction(chatId, "typing");
+      await delay(typingTime);
+
+      if (replyItem.type === "sticker") {
+        await bot.sendSticker(chatId, replyItem.value, sendOpts).catch((err) => {
+          console.error("Sticker send error:", err.message);
+        });
+      } else if (replyItem.type === "custom_emoji" && replyItem.emoji_entities?.length > 0) {
+        await bot.sendMessage(chatId, replyItem.value, {
+          reply_to_message_id: message.message_id,
+          disable_web_page_preview: true,
+          entities: buildEntitiesFromStored(replyItem.emoji_entities),
+        }).catch(async (err) => {
+          console.error("Custom emoji send error:", err.message);
+          await bot.sendMessage(chatId, replyItem.value, {
+            reply_to_message_id: message.message_id,
+            disable_web_page_preview: true,
+          }).catch(() => {});
+        });
+      } else {
+        await bot.sendMessage(chatId, replyItem.value, {
+          reply_to_message_id: message.message_id,
+          disable_web_page_preview: true,
+        }).catch(() => {});
+      }
+    }
+  } catch (error) {
+    const code = error?.response?.body?.error_code;
+    if (error.message?.includes("CHAT_WRITE_FORBIDDEN") || code === 403) {
+      await bot.leaveChat(chatId).catch(() => {});
+      await ChatModel.deleteOne({ chatId }).catch(() => {});
+    }
+  }
 }
 
 // ─── main message handler ─────────────────────────────────────────────────────
@@ -305,51 +367,42 @@ async function saveUserInformation(message) {
       {
         $setOnInsert: {
           user_id: user.id,
-          lang_code: langCode,
           is_dev: false,
         },
         $set: {
           username: user.username,
           firstname: user.first_name,
           lastname: user.last_name,
+          lang_code: langCode,
         },
       },
       { upsert: true }
     );
-  } catch (err) {
-    // Silencioso - é apenas fallback
-  }
+  } catch (err) {}
 }
 
 async function saveNewChatMembers(msg) {
   const chatId = msg.chat.id;
   const chatName = msg.chat.title;
   const chatType = msg.chat.type || "unknown";
+  const langCode = inferGroupLangCode(msg);
 
   try {
-    const chat = await ChatModel.findOne({ chatId }).catch(err => {
-      console.error(`[CHAT-FIND] Erro ao procurar grupo ${chatId}:`, err.message);
-      throw err;
-    });
+    const chat = await ChatModel.findOneAndUpdate(
+      { chatId },
+      {
+        $setOnInsert: { is_ban: false, lang_code: langCode },
+        $set: { chatName: chatName || `Group-${chatId}`, chat_type: chatType },
+      },
+      { upsert: true, new: true }
+    );
 
-    if (chat) {
-      if (chat.is_ban) {
-        await bot.leaveChat(chatId);
-      } else {
-        await ChatModel.findOneAndUpdate(
-          { chatId },
-          { chatName: chatName || chat.chatName, chat_type: chatType }
-        ).catch(() => {});
-      }
+    if (chat.is_ban) {
+      await bot.leaveChat(chatId);
       return;
     }
 
-    const created = await ChatModel.create({ chatId, chatName, chat_type: chatType, lang_code: "unknown" }).catch(err => {
-      console.error(`[CHAT-CREATE] Erro ao criar grupo ${chatId}:`, err.message);
-      throw err;
-    });
-    console.log(`[CHAT-CREATE] Grupo criado: ${chatId} - ${chatName} [${chatType}]`);
-
+    const isNew = chat.wasNew;
     const botUser = await bot.getMe();
     const addedNow = msg.new_chat_members?.some((m) => m.id === botUser.id);
     const chatLink = msg.chat.username ? `@${msg.chat.username}` : "Private Group";
@@ -357,7 +410,7 @@ async function saveNewChatMembers(msg) {
     if (addedNow) {
       const notif =
         `#Togurosbot #New_Group\n` +
-        `<b>Group:</b> ${chatName}\n` +
+        `<b>Group:</b> ${chat.chatName}\n` +
         `<b>ID:</b> <code>${chatId}</code>\n` +
         `<b>Type:</b> <code>${chatType}</code>\n` +
         `<b>Link:</b> ${chatLink}`;
@@ -437,36 +490,38 @@ async function ensureUserSaved(message) {
   }
 }
 
+function inferGroupLangCode(msg) {
+  if (msg.from && msg.from.language_code) return msg.from.language_code;
+  const members = msg.new_chat_members;
+  if (Array.isArray(members) && members.length > 0) {
+    const codes = members.map(m => m.language_code).filter(Boolean);
+    if (codes.length > 0) return codes[0];
+  }
+  return "unknown";
+}
+
 async function ensureGroupSaved(msg) {
   const chatId = msg.chat.id;
   const chatName = msg.chat.title || msg.chat.username || `Group-${chatId}`;
   const chatType = msg.chat.type || "unknown";
+  const langCode = inferGroupLangCode(msg);
 
   try {
-    const exists = await ChatModel.findOne({ chatId });
+    const result = await ChatModel.findOneAndUpdate(
+      { chatId },
+      {
+        $setOnInsert: { is_ban: false, lang_code: langCode },
+        $set: { chatName, chat_type: chatType },
+      },
+      { upsert: true, new: true }
+    );
 
-    if (exists) {
-      if (exists.is_ban) return false;
+    if (result.is_ban) return false;
 
-      await ChatModel.findOneAndUpdate(
-        { chatId },
-        {
-          chatName,
-          chat_type: chatType,
-          $setOnInsert: { lang_code: "unknown" }
-        }
-      );
-      return true;
+    if (langCode !== "unknown" && result.lang_code === "unknown") {
+      await ChatModel.updateOne({ chatId }, { $set: { lang_code: langCode } }).catch(() => {});
     }
 
-    await ChatModel.create({
-      chatId,
-      chatName,
-      chat_type: chatType,
-      lang_code: "unknown",
-      is_ban: false
-    });
-    console.log(`[ENSURE-GROUP] Novo grupo salvo: ${chatId} (${chatName}) [${chatType}]`);
     return true;
   } catch (err) {
     console.error(`[ENSURE-GROUP-ERROR] Falha ao salvar grupo ${chatId}:`, err.message);
@@ -724,33 +779,33 @@ async function unban(message) {
 // ─── /delmsg ──────────────────────────────────────────────────────────────────
 
 async function removeMessage(message) {
-    if (!is_dev(message.from.id)) return;
+  if (!is_dev(message.from.id)) return;
 
-    const repliedMessage =
-        message.reply_to_message &&
-        (message.reply_to_message.sticker?.file_unique_id ?? message.reply_to_message.text);
+  const repliedMessage = message.reply_to_message
+    ? buildMessageKey(message.reply_to_message)
+    : null;
 
-    if (!repliedMessage) {
-        return bot.sendMessage(message.chat.id, "Responda a uma mensagem para deletar do banco.");
-    }
+  if (!repliedMessage) {
+    return bot.sendMessage(message.chat.id, "Responda a uma mensagem para deletar do banco.");
+  }
 
-    const exists = await MessageModel.exists({ message: repliedMessage });
-    if (!exists) {
-        return bot.sendMessage(message.chat.id, "Mensagem não encontrada no banco de dados.");
-    }
+  const exists = await MessageModel.exists({ message: repliedMessage });
+  if (!exists) {
+    return bot.sendMessage(message.chat.id, "Mensagem não encontrada no banco de dados.");
+  }
 
-    await MessageModel.deleteMany({
-        $or: [
-            { message: repliedMessage },
-            { reply: { $elemMatch: { $eq: repliedMessage } } },
-        ],
-    });
+  await MessageModel.deleteMany({
+    $or: [
+      { message: repliedMessage },
+      { "reply.value": repliedMessage },
+    ],
+  });
 
-    bot.sendMessage(
-        message.chat.id,
-        `✅ Deletado por <a href="tg://user?id=${message.from.id}">${message.from.first_name}</a>.\n\nTodas as respostas associadas foram apagadas.`,
-        { parse_mode: "HTML", reply_to_message_id: message.message_id }
-    );
+  bot.sendMessage(
+    message.chat.id,
+    `✅ Deletado por <a href="tg://user?id=${message.from.id}">${message.from.first_name}</a>.\n\nTodas as respostas associadas foram apagadas.`,
+    { parse_mode: "HTML", reply_to_message_id: message.message_id }
+  );
 }
 
 // ─── /devs ────────────────────────────────────────────────────────────────────
@@ -1372,27 +1427,69 @@ async function migrateGroupsLangCode() {
   console.log("Migracao de chat_type dos grupos concluida!");
 }
 
+const REPLY_MAX_SIZE = 50;
+
+async function migrateReplyFormat() {
+  console.log("[MIGRATE-REPLY] Iniciando migração (batch com cursor)...");
+  let processed = 0;
+  let migrated = 0;
+  const batchSize = 100;
+  let hasMore = true;
+  let lastId = null;
+
+  while (hasMore) {
+    const query = lastId ? { _id: { $gt: lastId } } : {};
+    const docs = await MessageModel.find(query)
+      .sort({ _id: 1 })
+      .limit(batchSize)
+      .lean();
+
+    if (!docs.length) { hasMore = false; break; }
+    lastId = docs[docs.length - 1]._id;
+
+    for (const doc of docs) {
+      processed++;
+      if (!Array.isArray(doc.reply) || doc.reply.length === 0) continue;
+      const needsMigration = doc.reply.some(
+        (item) => typeof item === "string" || item instanceof String || (item.custom_emoji_ids && !item.emoji_entities)
+      );
+      if (!needsMigration) continue;
+
+      const newReply = doc.reply.map((item) => {
+        if (typeof item === "string" || item instanceof String) {
+          const isStickerFileId = /^[A-Za-z0-9_-]{30,}$/.test(item);
+          return { type: isStickerFileId ? "sticker" : "text", value: item, emoji_entities: [] };
+        }
+        if (item.custom_emoji_ids && !item.emoji_entities) {
+          item.emoji_entities = [];
+          delete item.custom_emoji_ids;
+        }
+        return item;
+      });
+
+      await MessageModel.updateOne({ _id: doc._id }, { $set: { reply: newReply } }).catch(() => {});
+      migrated++;
+    }
+
+    if (processed % 500 === 0) {
+      console.log(`[MIGRATE-REPLY] Progresso: ${processed} processados, ${migrated} migrados`);
+      await delay(100);
+    }
+  }
+
+  console.log(`[MIGRATE-REPLY] Concluída: ${migrated} migrados de ${processed} total.`);
+}
+
 // ─── exports ──────────────────────────────────────────────────────────────────
 
 exports.initHandler = () => {
-    // Migração inicial de lang_code (apenas se habilitado)
-    if (process.env.ENABLE_LANG_MIGRATION === 'true') {
-        setTimeout(() => {
-            migrateUsersLangCode();
-            migrateGroupsLangCode();
-        }, 30000); // Espera 30 segundos para o bot iniciar completamente
-    } else {
-        console.log("⚠️ Migração de lang_code desabilitada na inicialização.");
-        console.log("   Para ativar, defina ENABLE_LANG_MIGRATION=true no arquivo .env");
-    }
+  registerCallbackHandler();
 
-    registerCallbackHandler();
-
-    bot.on("message", main);
-    bot.on("message", saveUserInformation);
-    bot.on("polling_error", pollingError);
-    bot.on("new_chat_members", saveNewChatMembers);
-    bot.on("left_chat_member", removeLeftChatMember);
+  bot.on("message", main);
+  bot.on("message", saveUserInformation);
+  bot.on("polling_error", pollingError);
+  bot.on("new_chat_members", saveNewChatMembers);
+  bot.on("left_chat_member", removeLeftChatMember);
 
     bot.onText(/^\/start$/, start);
     bot.onText(/^\/stats$/, stats);
@@ -1430,15 +1527,17 @@ exports.initHandler = () => {
     new CronJob("0 0 12 * * *", sendAdsToGroups, null, true, "America/Sao_Paulo");
     new CronJob("0 0 20 * * *", sendAdsToGroups, null, true, "America/Sao_Paulo");
 
-    // Sistema de auto-recuperação a cada 5 minutos
-    new CronJob("0 */5 * * * *", async () => {
-        const memoryUsage = process.memoryUsage();
-        if (memoryUsage.heapUsed > 500 * 1024 * 1024) { // 500MB
-            console.log("🧹 Limpeza de memória iniciada...");
-            global.gc && global.gc();
-            console.log("✅ Memória otimizada");
-        }
-    }, null, true, "America/Sao_Paulo");
+  // Migração de reply: dia 1 de cada mês às 03:00
+  new CronJob("0 0 3 1 * *", migrateReplyFormat, null, true, "America/Sao_Paulo");
+
+  // Monitor de memória: a cada 5min, restart via pm2 se > 500MB
+  new CronJob("0 */5 * * * *", async () => {
+    const mem = process.memoryUsage();
+    if (mem.heapUsed > 500 * 1024 * 1024) {
+      console.log(`[MEM] Heap ${Math.round(mem.heapUsed / 1024 / 1024)}MB > 500MB — reiniciando via pm2...`);
+      process.exit(1);
+    }
+  }, null, true, "America/Sao_Paulo");
 
     sendBotOnlineMessage();
 };
