@@ -311,6 +311,8 @@ async function answerUser(message) {
     const doc = await MessageModel.findOne({ message: received });
     console.log(`[ANSWER] received="${received.slice(0,50)}" doc=${doc ? `found(replies=${doc.reply.length})` : "null"}`);
     if (doc && doc.reply.length) {
+      const raw0 = doc.reply[0];
+      console.log(`[RAW-REPLY] typeof=${typeof raw0} keys=${JSON.stringify(Object.keys(raw0 || {}))} raw=${JSON.stringify(raw0).slice(0, 120)}`);
       const validReplies = doc.reply
         .map(normalizeReplyItem)
         .filter((r) => r && r.value);
