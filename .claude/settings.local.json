@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(rtk ls *)",
+      "Bash(rtk grep *)",
+      "Bash(rtk git *)",
+      "Bash(node scripts/migrate-replies.js \"mongodb+srv://starvoisx:levi123@cluster0.tec213s.mongodb.net/?retryWrites=true&w=majority\")",
+      "Bash(node -e \"require\\('./node_modules/dotenv'\\)\")"
+    ]
+  }
+}
