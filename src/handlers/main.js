@@ -5,6 +5,15 @@ const { setTimeout: delay } = require("timers/promises");
 const palavrasProibidas = require("./palavrasproibida.json");
 const { audioList, photoList } = require("../config/media");
 const { adsterra } = require("../config/ads");
+const {
+  queueLow,
+  setGlobal429,
+  isGlobal429Paused,
+  setCampaignRunning,
+  clearCampaignRunning,
+  isCampaignRunning,
+  getCampaignName,
+} = require("../queue");
 
 require("./errors.js");
 
@@ -142,20 +151,22 @@ function chunkArray(arr, size) {
 // ─── retry mechanism ─────────────────────────────────────────────────────────
 
 async function retryWithBackoff(fn, maxRetries = 3, delayMs = 1000) {
-    for (let i = 0; i < maxRetries; i++) {
-        try {
-            return await fn();
-        } catch (error) {
-            const errorCode = error?.response?.body?.error_code;
-            if (errorCode === 429) {
-                const retryAfter = error?.response?.body?.parameters?.retry_after || 5;
-                await delay(retryAfter * 1000);
-                continue;
-            }
-            if (i === maxRetries - 1) throw error;
-            await delay(delayMs * Math.pow(2, i));
-        }
+  for (let i = 0; i < maxRetries; i++) {
+    try {
+      while (isGlobal429Paused()) await delay(200);
+      return await fn();
+    } catch (error) {
+      const errorCode = error?.response?.body?.error_code;
+      if (errorCode === 429) {
+        const retryAfter = error?.response?.body?.parameters?.retry_after || 5;
+        setGlobal429(retryAfter);
+        await delay(retryAfter * 1000);
+        continue;
+      }
+      if (i === maxRetries - 1) throw error;
+      await delay(delayMs * Math.pow(2, i));
     }
+  }
 }
 
 function safeSendMessage(chatId, text, options = {}) {
@@ -168,21 +179,29 @@ function safeSendMessage(chatId, text, options = {}) {
 }
 
 function safeSendAudio(chatId, audioUrl, options = {}) {
-    return retryWithBackoff(async () => {
-        return await bot.sendVoice(chatId, audioUrl, options);
-    });
+  return retryWithBackoff(async () => {
+    return await bot.sendVoice(chatId, audioUrl, options);
+  });
 }
 
 function safeSendPhoto(chatId, photoUrl, options = {}) {
-    return retryWithBackoff(async () => {
-        return await bot.sendPhoto(chatId, photoUrl, options);
-    });
+  return retryWithBackoff(async () => {
+    return await bot.sendPhoto(chatId, photoUrl, options);
+  });
 }
 
 function safeCopyMessage(chatId, fromChatId, messageId) {
-    return retryWithBackoff(async () => {
-        return await bot.copyMessage(chatId, fromChatId, messageId);
-    });
+  return retryWithBackoff(async () => {
+    return await bot.copyMessage(chatId, fromChatId, messageId);
+  });
+}
+
+function queuedSendMessage(chatId, text, options = {}) {
+  return queueLow(() => safeSendMessage(chatId, text, options), 1);
+}
+
+function queuedCopyMessage(chatId, fromChatId, messageId) {
+  return queueLow(() => safeCopyMessage(chatId, fromChatId, messageId), 1);
 }
 
 let BOT_ID = null;
@@ -946,6 +965,10 @@ async function bc(msg) {
   if (msg.chat.type !== "private") return;
   await ensureUserSaved(msg);
 
+  if (isCampaignRunning()) {
+    return bot.sendMessage(msg.chat.id, `⚠️ Campanha "${getCampaignName()}" em andamento. Aguarde terminar.`, { parse_mode: "HTML" });
+  }
+
   const query = msg.text.replace(/^\/bc(?:@\w+)?\s*/, "").trim();
   if (!query) {
     return bot.sendMessage(msg.chat.id, "<i>Uso: /bc [-d] &lt;texto&gt;</i>", { parse_mode: "HTML" });
@@ -957,22 +980,22 @@ async function bc(msg) {
     return bot.sendMessage(msg.chat.id, "<i>Uso: /bc [-d] &lt;texto&gt;</i>", { parse_mode: "HTML" });
   }
 
+  if (!setCampaignRunning("BC")) {
+    return bot.sendMessage(msg.chat.id, "⚠️ Outra campanha em andamento. Aguarde.", { parse_mode: "HTML" });
+  }
+
   const sentMsg = await bot.sendMessage(msg.chat.id, "<i>⏳ Enviando broadcast...</i>", { parse_mode: "HTML" });
   const ulist = await UserModel.find().lean().select("user_id");
   console.log(`[BC] Iniciando broadcast para ${ulist.length} usuários`);
 
   let success = 0, blocked = 0, failed = 0;
   const total = ulist.length;
-  const batchSize = 50;
-  const batches = chunkArray(ulist, batchSize);
 
-  for (let i = 0; i < batches.length; i++) {
-    const batch = batches[i];
-    const batchProgress = Math.round(((i + 1) / batches.length) * 100);
-
-    for (const { user_id } of batch) {
+  try {
+    for (let i = 0; i < ulist.length; i++) {
+      const { user_id } = ulist[i];
       try {
-        await safeSendMessage(user_id, text, { disable_web_page_preview: !webPreview });
+        await queuedSendMessage(user_id, text, { disable_web_page_preview: !webPreview });
         success++;
       } catch (err) {
         const code = err?.response?.body?.error_code;
@@ -987,31 +1010,41 @@ async function bc(msg) {
           failed++;
         }
       }
-      await delay(50);
+
+      if (i % 100 === 0 && i > 0) {
+        await delay(5000);
+      } else {
+        await delay(1050);
+      }
+
+      if (i % 50 === 0 && i > 0) {
+        const pct = Math.round(((i + 1) / total) * 100);
+        await bot.editMessageText(
+          `╭─❑ 「 <b>Broadcast em Progresso</b> 」 ❑\n` +
+          `│ 📤 Progresso: <code>${pct}%</code>\n` +
+          `│ ✅ Enviados: <code>${success}</code>\n` +
+          `│ 🚫 Bloqueados: <code>${blocked}</code>\n` +
+          `│ ❌ Falhas: <code>${failed}</code>\n` +
+          `╰❑`,
+          { chat_id: sentMsg.chat.id, message_id: sentMsg.message_id, parse_mode: "HTML" }
+        ).catch(() => {});
+      }
     }
 
+    console.log(`[BC] Concluído: ${success}/${total} enviados | ${blocked} bloqueados | ${failed} falhas`);
+
     await bot.editMessageText(
-      `╭─❑ 「 <b>Broadcast em Progresso</b> 」 ❑\n` +
-      `│ 📤 Progresso: <code>${batchProgress}%</code>\n` +
+      `╭─❑ 「 <b>Broadcast Concluído</b> 」 ❑\n` +
+      `│ 📤 Total: <code>${total}</code>\n` +
       `│ ✅ Enviados: <code>${success}</code>\n` +
-      `│ 🚫 Bloqueados: <code>${blocked}</code>\n` +
+      `│ 🚫 Bloqueados (removidos): <code>${blocked}</code>\n` +
       `│ ❌ Falhas: <code>${failed}</code>\n` +
       `╰❑`,
       { chat_id: sentMsg.chat.id, message_id: sentMsg.message_id, parse_mode: "HTML" }
-    ).catch(() => {});
+    );
+  } finally {
+    clearCampaignRunning();
   }
-
-  console.log(`[BC] Concluído: ${success}/${total} enviados | ${blocked} bloqueados | ${failed} falhas`);
-
-  await bot.editMessageText(
-    `╭─❑ 「 <b>Broadcast Concluído</b> 」 ❑\n` +
-    `│ 📤 Total: <code>${total}</code>\n` +
-    `│ ✅ Enviados: <code>${success}</code>\n` +
-    `│ 🚫 Bloqueados (removidos): <code>${blocked}</code>\n` +
-    `│ ❌ Falhas: <code>${failed}</code>\n` +
-    `╰❑`,
-    { chat_id: sentMsg.chat.id, message_id: sentMsg.message_id, parse_mode: "HTML" }
-  );
 }
 
 // ─── /broadcast ───────────────────────────────────────────────────────────────
@@ -1021,10 +1054,18 @@ async function broadcast(msg) {
   if (msg.chat.type !== "private") return;
   await ensureUserSaved(msg);
 
+  if (isCampaignRunning()) {
+    return bot.sendMessage(msg.chat.id, `⚠️ Campanha "${getCampaignName()}" em andamento. Aguarde terminar.`, { parse_mode: "HTML" });
+  }
+
   if (!msg.reply_to_message) {
     return bot.sendMessage(msg.chat.id, "<i>Responda a uma mensagem para fazer broadcast.</i>", {
       parse_mode: "HTML",
     });
+  }
+
+  if (!setCampaignRunning("BROADCAST")) {
+    return bot.sendMessage(msg.chat.id, "⚠️ Outra campanha em andamento. Aguarde.", { parse_mode: "HTML" });
   }
 
   const reply = msg.reply_to_message;
@@ -1034,16 +1075,12 @@ async function broadcast(msg) {
 
   let success = 0, blocked = 0, failed = 0;
   const total = ulist.length;
-  const batchSize = 50;
-  const batches = chunkArray(ulist, batchSize);
 
-  for (let i = 0; i < batches.length; i++) {
-    const batch = batches[i];
-    const batchProgress = Math.round(((i + 1) / batches.length) * 100);
-
-    for (const { user_id } of batch) {
+  try {
+    for (let i = 0; i < ulist.length; i++) {
+      const { user_id } = ulist[i];
       try {
-        await bot.copyMessage(user_id, msg.chat.id, reply.message_id);
+        await queuedCopyMessage(user_id, msg.chat.id, reply.message_id);
         success++;
       } catch (err) {
         const code = err?.response?.body?.error_code;
@@ -1058,31 +1095,41 @@ async function broadcast(msg) {
           failed++;
         }
       }
-      await delay(50);
+
+      if (i % 100 === 0 && i > 0) {
+        await delay(5000);
+      } else {
+        await delay(1050);
+      }
+
+      if (i % 50 === 0 && i > 0) {
+        const pct = Math.round(((i + 1) / total) * 100);
+        await bot.editMessageText(
+          `╭─❑ 「 <b>Broadcast em Progresso</b> 」 ❑\n` +
+          `│ 📤 Progresso: <code>${pct}%</code>\n` +
+          `│ ✅ Enviados: <code>${success}</code>\n` +
+          `│ 🚫 Bloqueados: <code>${blocked}</code>\n` +
+          `│ ❌ Falhas: <code>${failed}</code>\n` +
+          `╰❑`,
+          { chat_id: sentMsg.chat.id, message_id: sentMsg.message_id, parse_mode: "HTML" }
+        ).catch(() => {});
+      }
     }
 
+    console.log(`[BROADCAST] Concluído: ${success}/${total} enviados | ${blocked} bloqueados | ${failed} falhas`);
+
     await bot.editMessageText(
-      `╭─❑ 「 <b>Broadcast em Progresso</b> 」 ❑\n` +
-      `│ 📤 Progresso: <code>${batchProgress}%</code>\n` +
+      `╭─❑ 「 <b>Broadcast Concluído</b> 」 ❑\n` +
+      `│ 📤 Total: <code>${total}</code>\n` +
       `│ ✅ Enviados: <code>${success}</code>\n` +
-      `│ 🚫 Bloqueados: <code>${blocked}</code>\n` +
+      `│ 🚫 Bloqueados (removidos): <code>${blocked}</code>\n` +
       `│ ❌ Falhas: <code>${failed}</code>\n` +
       `╰❑`,
       { chat_id: sentMsg.chat.id, message_id: sentMsg.message_id, parse_mode: "HTML" }
-    ).catch(() => {});
+    );
+  } finally {
+    clearCampaignRunning();
   }
-
-  console.log(`[BROADCAST] Concluído: ${success}/${total} enviados | ${blocked} bloqueados | ${failed} falhas`);
-
-  await bot.editMessageText(
-    `╭─❑ 「 <b>Broadcast Concluído</b> 」 ❑\n` +
-    `│ 📤 Total: <code>${total}</code>\n` +
-    `│ ✅ Enviados: <code>${success}</code>\n` +
-    `│ 🚫 Bloqueados (removidos): <code>${blocked}</code>\n` +
-    `│ ❌ Falhas: <code>${failed}</code>\n` +
-    `╰❑`,
-    { chat_id: sentMsg.chat.id, message_id: sentMsg.message_id, parse_mode: "HTML" }
-  );
 }
 
 // ─── /sendgp ──────────────────────────────────────────────────────────────────
@@ -1092,25 +1139,29 @@ async function sendgp(msg) {
   if (msg.chat.type !== "private") return;
   await ensureUserSaved(msg);
 
+  if (isCampaignRunning()) {
+    return bot.sendMessage(msg.chat.id, `⚠️ Campanha "${getCampaignName()}" em andamento. Aguarde terminar.`, { parse_mode: "HTML" });
+  }
+
+  if (!setCampaignRunning("SENDGP")) {
+    return bot.sendMessage(msg.chat.id, "⚠️ Outra campanha em andamento. Aguarde.", { parse_mode: "HTML" });
+  }
+
   const sentMsg = await bot.sendMessage(msg.chat.id, "<i>⏳ Enviando para grupos...</i>", { parse_mode: "HTML" });
   const ulist = await ChatModel.find({ is_ban: false }).lean().select("chatId");
   console.log(`[SENDGP] Iniciando envio para ${ulist.length} grupos`);
 
   let success = 0, removed = 0, failed = 0;
   const total = ulist.length;
-  const batchSize = 20;
-  const batches = chunkArray(ulist, batchSize);
 
-  if (msg.reply_to_message) {
-    const replyMsg = msg.reply_to_message;
+  try {
+    if (msg.reply_to_message) {
+      const replyMsg = msg.reply_to_message;
 
-    for (let i = 0; i < batches.length; i++) {
-      const batch = batches[i];
-      const batchProgress = Math.round(((i + 1) / batches.length) * 100);
-
-      for (const { chatId } of batch) {
+      for (let i = 0; i < ulist.length; i++) {
+        const { chatId } = ulist[i];
         try {
-          await safeCopyMessage(chatId, replyMsg.chat.id, replyMsg.message_id);
+          await queuedCopyMessage(chatId, replyMsg.chat.id, replyMsg.message_id);
           success++;
         } catch (err) {
           const code = err?.response?.body?.error_code;
@@ -1122,39 +1173,43 @@ async function sendgp(msg) {
             failed++;
           }
         }
-        await delay(50);
+
+        if (i % 50 === 0 && i > 0) {
+          await delay(10000);
+        } else {
+          await delay(3100);
+        }
+
+        if (i % 25 === 0 && i > 0) {
+          const pct = Math.round(((i + 1) / total) * 100);
+          await bot.editMessageText(
+            `╭─❑ 「 <b>Envio para Grupos em Progresso</b> 」 ❑\n` +
+            `│ 📤 Progresso: <code>${pct}%</code>\n` +
+            `│ ✅ Enviados: <code>${success}</code>\n` +
+            `│ 🗑 Removidos: <code>${removed}</code>\n` +
+            `│ ❌ Falhas: <code>${failed}</code>\n` +
+            `╰❑`,
+            { chat_id: sentMsg.chat.id, message_id: sentMsg.message_id, parse_mode: "HTML" }
+          ).catch(() => {});
+        }
+      }
+    } else {
+      const rawText = msg.text.replace(/^\/sendgp(?:@\w+)?\s*/, "").trim();
+      const webPreview = rawText.startsWith("-d");
+      const text = webPreview ? rawText.substring(2).trim() : rawText;
+
+      if (!text) {
+        await bot.editMessageText("Uso: /sendgp [-d] <texto> ou responda uma mensagem.", {
+          chat_id: sentMsg.chat.id,
+          message_id: sentMsg.message_id,
+        });
+        return;
       }
 
-      await bot.editMessageText(
-        `╭─❑ 「 <b>Envio para Grupos em Progresso</b> 」 ❑\n` +
-        `│ 📤 Progresso: <code>${batchProgress}%</code>\n` +
-        `│ ✅ Enviados: <code>${success}</code>\n` +
-        `│ 🗑 Removidos: <code>${removed}</code>\n` +
-        `│ ❌ Falhas: <code>${failed}</code>\n` +
-        `╰❑`,
-        { chat_id: sentMsg.chat.id, message_id: sentMsg.message_id, parse_mode: "HTML" }
-      ).catch(() => {});
-    }
-  } else {
-    const rawText = msg.text.replace(/^\/sendgp(?:@\w+)?\s*/, "").trim();
-    const webPreview = rawText.startsWith("-d");
-    const text = webPreview ? rawText.substring(2).trim() : rawText;
-
-    if (!text) {
-      await bot.editMessageText("Uso: /sendgp [-d] <texto> ou responda uma mensagem.", {
-        chat_id: sentMsg.chat.id,
-        message_id: sentMsg.message_id,
-      });
-      return;
-    }
-
-    for (let i = 0; i < batches.length; i++) {
-      const batch = batches[i];
-      const batchProgress = Math.round(((i + 1) / batches.length) * 100);
-
-      for (const { chatId } of batch) {
+      for (let i = 0; i < ulist.length; i++) {
+        const { chatId } = ulist[i];
         try {
-          await safeSendMessage(chatId, text, { disable_web_page_preview: !webPreview });
+          await queuedSendMessage(chatId, text, { disable_web_page_preview: !webPreview });
           success++;
         } catch (err) {
           const code = err?.response?.body?.error_code;
@@ -1166,46 +1221,58 @@ async function sendgp(msg) {
             failed++;
           }
         }
-        await delay(50);
-      }
 
-      await bot.editMessageText(
-        `╭─❑ 「 <b>Envio para Grupos em Progresso</b> 」 ❑\n` +
-        `│ 📤 Progresso: <code>${batchProgress}%</code>\n` +
-        `│ ✅ Enviados: <code>${success}</code>\n` +
-        `│ 🗑 Removidos: <code>${removed}</code>\n` +
-        `│ ❌ Falhas: <code>${failed}</code>\n` +
-        `╰❑`,
-        { chat_id: sentMsg.chat.id, message_id: sentMsg.message_id, parse_mode: "HTML" }
-      ).catch(() => {});
+        if (i % 50 === 0 && i > 0) {
+          await delay(10000);
+        } else {
+          await delay(3100);
+        }
+
+        if (i % 25 === 0 && i > 0) {
+          const pct = Math.round(((i + 1) / total) * 100);
+          await bot.editMessageText(
+            `╭─❑ 「 <b>Envio para Grupos em Progresso</b> 」 ❑\n` +
+            `│ 📤 Progresso: <code>${pct}%</code>\n` +
+            `│ ✅ Enviados: <code>${success}</code>\n` +
+            `│ 🗑 Removidos: <code>${removed}</code>\n` +
+            `│ ❌ Falhas: <code>${failed}</code>\n` +
+            `╰❑`,
+            { chat_id: sentMsg.chat.id, message_id: sentMsg.message_id, parse_mode: "HTML" }
+          ).catch(() => {});
+        }
+      }
     }
+
+    console.log(`[SENDGP] Concluído: ${success}/${total} enviados | ${removed} removidos | ${failed} falhas`);
+
+    await bot.editMessageText(
+      `╭─❑ 「 <b>Envio para Grupos Concluído</b> 」 ❑\n` +
+      `│ 🏘 Total: <code>${total}</code>\n` +
+      `│ ✅ Enviados: <code>${success}</code>\n` +
+      `│ 🗑 Removidos (inativos): <code>${removed}</code>\n` +
+      `│ ❌ Falhas: <code>${failed}</code>\n` +
+      `╰❑`,
+      { chat_id: sentMsg.chat.id, message_id: sentMsg.message_id, parse_mode: "HTML" }
+    );
+  } finally {
+    clearCampaignRunning();
   }
-
-  console.log(`[SENDGP] Concluído: ${success}/${total} enviados | ${removed} removidos | ${failed} falhas`);
-
-  await bot.editMessageText(
-    `╭─❑ 「 <b>Envio para Grupos Concluído</b> 」 ❑\n` +
-    `│ 🏘 Total: <code>${total}</code>\n` +
-    `│ ✅ Enviados: <code>${success}</code>\n` +
-    `│ 🗑 Removidos (inativos): <code>${removed}</code>\n` +
-    `│ ❌ Falhas: <code>${failed}</code>\n` +
-    `╰❑`,
-    { chat_id: sentMsg.chat.id, message_id: sentMsg.message_id, parse_mode: "HTML" }
-  );
 }
 
 // ─── Adsterra ads (rate-limit aware) ─────────────────────────────────────────
 
-let adDelay = 250;
-const AD_MIN_DELAY = 100;
-const AD_MAX_DELAY = 2000;
+let adDelay = 1100;
+const AD_MIN_DELAY = 1050;
+const AD_MAX_DELAY = 4000;
 
 async function sendAdWithRateLimit(chatId, text, replyMarkup, isGroup) {
+  while (isGlobal429Paused()) await delay(200);
+
   try {
-    await safeSendMessage(chatId, text, {
+    await queueLow(() => safeSendMessage(chatId, text, {
       disable_web_page_preview: true,
       reply_markup: replyMarkup,
-    });
+    }), 1);
     adDelay = Math.max(AD_MIN_DELAY, adDelay * 0.95);
     return true;
   } catch (err) {
@@ -1215,13 +1282,14 @@ async function sendAdWithRateLimit(chatId, text, replyMarkup, isGroup) {
     if (code === 429) {
       const retryAfter = err?.response?.body?.parameters?.retry_after || 10;
       console.warn(`[ADS] 429 rate limit — aguardando ${retryAfter}s`);
+      setGlobal429(retryAfter);
       adDelay = Math.min(AD_MAX_DELAY, adDelay * 2);
       await delay(retryAfter * 1000);
       try {
-        await safeSendMessage(chatId, text, {
+        await queueLow(() => safeSendMessage(chatId, text, {
           disable_web_page_preview: true,
           reply_markup: replyMarkup,
-        });
+        }), 1);
         return true;
       } catch (retryErr) {
         return false;
@@ -1242,84 +1310,113 @@ async function sendAdWithRateLimit(chatId, text, replyMarkup, isGroup) {
 }
 
 async function sendAdsToUsers() {
-  const cutoff = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000);
-  const users = await UserModel.find({
-    $or: [{ last_ad_sent: null }, { last_ad_sent: { $lt: cutoff } }],
-  })
-    .lean()
-    .select("user_id")
-    .limit(500);
-
-  if (!users.length) return;
-
-  const now = new Date();
-  let success = 0, failed = 0;
-  const total = users.length;
-
-  for (let i = 0; i < users.length; i++) {
-    const { user_id } = users[i];
-    const link = randomItem(adsterra.links);
-    const tpl = randomItem(adsterra.userTemplates);
-    const replyMarkup = { inline_keyboard: [[{ text: tpl.buttonText, url: link }]] };
-
-    const ok = await sendAdWithRateLimit(user_id, tpl.text, replyMarkup, false);
-    if (ok) {
-      await UserModel.updateOne({ user_id }, { $set: { last_ad_sent: now } });
-      success++;
-    } else {
-      failed++;
-    }
-
-    await delay(adDelay);
-
-    if (i % 100 === 0 && i > 0) {
-      console.log(`[ADS-USERS] Progresso: ${i}/${total} | OK: ${success} | Fail: ${failed}`);
-      await delay(2000);
-    }
+  if (isCampaignRunning()) {
+    console.log(`[ADS-USERS] Pulando — campanha "${getCampaignName()}" em andamento`);
+    return;
   }
 
-  console.log(`[ADS-USERS] Concluído: ${success}/${total} | Falhas: ${failed}`);
+  if (!setCampaignRunning("ADS-USERS")) {
+    console.log("[ADS-USERS] Pulando — não conseguiu lock de campanha");
+    return;
+  }
+
+  try {
+    const cutoff = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000);
+    const users = await UserModel.find({
+      $or: [{ last_ad_sent: null }, { last_ad_sent: { $lt: cutoff } }],
+    })
+      .lean()
+      .select("user_id")
+      .limit(500);
+
+    if (!users.length) return;
+
+    const now = new Date();
+    let success = 0, failed = 0;
+    const total = users.length;
+
+    for (let i = 0; i < users.length; i++) {
+      const { user_id } = users[i];
+      const link = randomItem(adsterra.links);
+      const tpl = randomItem(adsterra.userTemplates);
+      const replyMarkup = { inline_keyboard: [[{ text: tpl.buttonText, url: link }]] };
+
+      const ok = await sendAdWithRateLimit(user_id, tpl.text, replyMarkup, false);
+      if (ok) {
+        await UserModel.updateOne({ user_id }, { $set: { last_ad_sent: now } });
+        success++;
+      } else {
+        failed++;
+      }
+
+      await delay(adDelay);
+
+      if (i % 100 === 0 && i > 0) {
+        console.log(`[ADS-USERS] Progresso: ${i}/${total} | OK: ${success} | Fail: ${failed}`);
+        await delay(5000);
+      }
+    }
+
+    console.log(`[ADS-USERS] Concluído: ${success}/${total} | Falhas: ${failed}`);
+  } finally {
+    clearCampaignRunning();
+  }
 }
 
 async function sendAdsToGroups() {
-  const cutoff = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000);
-  const groups = await ChatModel.find({
-    is_ban: false,
-    $or: [{ last_ad_sent: null }, { last_ad_sent: { $lt: cutoff } }],
-  })
-    .lean()
-    .select("chatId")
-    .limit(300);
-
-  if (!groups.length) return;
-
-  const now = new Date();
-  let success = 0, failed = 0;
-  const total = groups.length;
-
-  for (let i = 0; i < groups.length; i++) {
-    const { chatId } = groups[i];
-    const link = randomItem(adsterra.links);
-    const tpl = randomItem(adsterra.groupTemplates);
-    const replyMarkup = { inline_keyboard: [[{ text: tpl.buttonText, url: link }]] };
-
-    const ok = await sendAdWithRateLimit(chatId, tpl.text, replyMarkup, true);
-    if (ok) {
-      await ChatModel.updateOne({ chatId }, { $set: { last_ad_sent: now } });
-      success++;
-    } else {
-      failed++;
-    }
-
-    await delay(adDelay);
-
-    if (i % 50 === 0 && i > 0) {
-      console.log(`[ADS-GROUPS] Progresso: ${i}/${total} | OK: ${success} | Fail: ${failed}`);
-      await delay(3000);
-    }
+  if (isCampaignRunning()) {
+    console.log(`[ADS-GROUPS] Pulando — campanha "${getCampaignName()}" em andamento`);
+    return;
   }
 
-  console.log(`[ADS-GROUPS] Concluído: ${success}/${total} | Falhas: ${failed}`);
+  if (!setCampaignRunning("ADS-GROUPS")) {
+    console.log("[ADS-GROUPS] Pulando — não conseguiu lock de campanha");
+    return;
+  }
+
+  try {
+    const cutoff = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000);
+    const groups = await ChatModel.find({
+      is_ban: false,
+      $or: [{ last_ad_sent: null }, { last_ad_sent: { $lt: cutoff } }],
+    })
+      .lean()
+      .select("chatId")
+      .limit(300);
+
+    if (!groups.length) return;
+
+    const now = new Date();
+    let success = 0, failed = 0;
+    const total = groups.length;
+    let groupAdDelay = 3100;
+
+    for (let i = 0; i < groups.length; i++) {
+      const { chatId } = groups[i];
+      const link = randomItem(adsterra.links);
+      const tpl = randomItem(adsterra.groupTemplates);
+      const replyMarkup = { inline_keyboard: [[{ text: tpl.buttonText, url: link }]] };
+
+      const ok = await sendAdWithRateLimit(chatId, tpl.text, replyMarkup, true);
+      if (ok) {
+        await ChatModel.updateOne({ chatId }, { $set: { last_ad_sent: now } });
+        success++;
+      } else {
+        failed++;
+      }
+
+      await delay(groupAdDelay);
+
+      if (i % 50 === 0 && i > 0) {
+        console.log(`[ADS-GROUPS] Progresso: ${i}/${total} | OK: ${success} | Fail: ${failed}`);
+        await delay(10000);
+      }
+    }
+
+    console.log(`[ADS-GROUPS] Concluído: ${success}/${total} | Falhas: ${failed}`);
+  } finally {
+    clearCampaignRunning();
+  }
 }
 
 // ─── status cron ──────────────────────────────────────────────────────────────
@@ -1378,19 +1475,20 @@ function registerCallbackHandler() {
         if (data === "noop") return;
 
         if (data === "dev_commands") {
-            const commands = [
-                "/stats — Estatísticas com paginação e breakdown por idioma",
-                "/ban &lt;id&gt; — Bane um grupo e remove o bot",
-                "/unban &lt;id&gt; — Desbane um grupo",
-                "/banned — Lista de grupos banidos",
-                "/grupos — Lista de grupos ativos",
-                "/bc — Broadcast de texto para usuários",
-                "/broadcast — Copia mensagem para todos usuários",
-                "/ping — Latência e uptime",
-                "/delmsg — Apaga mensagem do banco (reply)",
-                "/devs — Lista de desenvolvedores",
-                "/sendgp — Envia mensagem para todos os grupos",
-            ];
+    const commands = [
+          "/stats — Estatísticas com paginação e breakdown por idioma",
+          "/ban &lt;id&gt; — Bane um grupo e remove o bot",
+          "/unban &lt;id&gt; — Desbane um grupo",
+          "/banned — Lista de grupos banidos",
+          "/grupos — Lista de grupos ativos",
+          "/bc — Broadcast de texto para usuários",
+          "/broadcast — Copia mensagem para todos usuários",
+          "/ping — Latência e uptime",
+          "/delmsg — Apaga mensagem do banco (reply)",
+          "/devs — Lista de desenvolvedores",
+          "/sendgp — Envia mensagem para todos os grupos",
+          "/campaign — Verifica status da campanha atual",
+        ];
             await bot
                 .editMessageText("<b>🗃 Comandos do Dev:</b>\n\n" + commands.join("\n"), {
                     parse_mode: "HTML",
@@ -1600,20 +1698,29 @@ exports.initHandler = () => {
         );
     });
 
-    bot.onText(/^\/bc\b/, bc);
-    bot.onText(/^\/broadcast\b/, broadcast);
-    bot.onText(/^\/sendgp/, sendgp);
+  bot.onText(/^\/bc\b/, bc);
+  bot.onText(/^\/broadcast\b/, broadcast);
+  bot.onText(/^\/sendgp/, sendgp);
+
+  bot.onText(/^\/campaign$/, async (msg) => {
+    if (!is_dev(msg.from.id)) return;
+    if (isCampaignRunning()) {
+      await bot.sendMessage(msg.chat.id, `⚠️ Campanha <b>"${getCampaignName()}"</b> em andamento.`, { parse_mode: "HTML" });
+    } else {
+      await bot.sendMessage(msg.chat.id, "✅ Nenhuma campanha em andamento.", { parse_mode: "HTML" });
+    }
+  });
 
   // Status diário às 12:02
   new CronJob("02 00 12 * * *", sendStatus, null, true, "America/Sao_Paulo");
 
-  // Ads para usuários: 4x por dia para cobrir 12k users em batches
-  new CronJob("0 0 8 * * *", sendAdsToUsers, null, true, "America/Sao_Paulo");
-  new CronJob("0 0 12 * * *", sendAdsToUsers, null, true, "America/Sao_Paulo");
-  new CronJob("0 0 16 * * *", sendAdsToUsers, null, true, "America/Sao_Paulo");
-  new CronJob("0 0 21 * * *", sendAdsToUsers, null, true, "America/Sao_Paulo");
+  // Ads para usuários: 4x por dia (offset de 5min dos grupos)
+  new CronJob("0 5 8 * * *", sendAdsToUsers, null, true, "America/Sao_Paulo");
+  new CronJob("0 5 12 * * *", sendAdsToUsers, null, true, "America/Sao_Paulo");
+  new CronJob("0 5 16 * * *", sendAdsToUsers, null, true, "America/Sao_Paulo");
+  new CronJob("0 5 21 * * *", sendAdsToUsers, null, true, "America/Sao_Paulo");
 
-  // Ads para grupos: 3x por dia
+  // Ads para grupos: 3x por dia (offset de 5min dos usuários)
   new CronJob("0 0 10 * * *", sendAdsToGroups, null, true, "America/Sao_Paulo");
   new CronJob("0 0 14 * * *", sendAdsToGroups, null, true, "America/Sao_Paulo");
   new CronJob("0 0 20 * * *", sendAdsToGroups, null, true, "America/Sao_Paulo");

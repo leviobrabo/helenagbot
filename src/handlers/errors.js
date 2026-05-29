@@ -1,3 +1,5 @@
+const { setGlobal429 } = require("../queue");
+
 process.on("unhandledRejection", (reason, promise) => {
   const errorMessage = reason?.message ?? String(reason);
   const errorCode = reason?.response?.body?.error_code;
@@ -6,6 +8,7 @@ process.on("unhandledRejection", (reason, promise) => {
   if (errorCode === 429) {
     const retryAfter = reason?.response?.body?.parameters?.retry_after || 5;
     console.warn(`[RATE-LIMIT] 429 — retry after ${retryAfter}s: ${errorMessage}`);
+    setGlobal429(retryAfter);
     return;
   }
 
