@@ -1,12 +1,71 @@
-const PQueue = require("p-queue").default;
+class SimpleQueue {
+  constructor(opts = {}) {
+    this._concurrency = opts.concurrency || 1;
+    this._interval = opts.interval || 0;
+    this._intervalCap = opts.intervalCap || Infinity;
+    this._running = 0;
+    this._queue = [];
+    this._intervalCount = 0;
+    this._intervalTimer = null;
+    if (this._interval > 0) {
+      this._intervalTimer = setInterval(() => {
+        this._intervalCount = 0;
+        this._tryRun();
+      }, this._interval);
+      if (this._intervalTimer.unref) this._intervalTimer.unref();
+    }
+  }
 
-const highQueue = new PQueue({
+  add(fn, opts = {}) {
+    return new Promise((resolve, reject) => {
+      const priority = opts.priority || 0;
+      this._queue.push({ fn, resolve, reject, priority });
+      this._queue.sort((a, b) => b.priority - a.priority);
+      this._tryRun();
+    });
+  }
+
+  _tryRun() {
+    while (
+      this._queue.length > 0 &&
+      this._running < this._concurrency &&
+      this._intervalCount < this._intervalCap
+    ) {
+      this._running++;
+      this._intervalCount++;
+      const { fn, resolve, reject } = this._queue.shift();
+      Promise.resolve()
+        .then(() => fn())
+        .then(resolve)
+        .catch(reject)
+        .finally(() => {
+          this._running--;
+          this._tryRun();
+        });
+    }
+  }
+
+  pause() {
+    this._paused = true;
+  }
+
+  start() {
+    this._paused = false;
+    this._tryRun();
+  }
+
+  get size() {
+    return this._queue.length + this._running;
+  }
+}
+
+const highQueue = new SimpleQueue({
   concurrency: 5,
   interval: 1000,
   intervalCap: 10,
 });
 
-const lowQueue = new PQueue({
+const lowQueue = new SimpleQueue({
   concurrency: 1,
   interval: 1000,
   intervalCap: 15,
