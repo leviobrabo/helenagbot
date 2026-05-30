@@ -27,6 +27,7 @@ class SimpleQueue {
 
   _tryRun() {
     while (
+      !this._paused &&
       this._queue.length > 0 &&
       this._running < this._concurrency &&
       this._intervalCount < this._intervalCap

@@ -401,8 +401,8 @@ async function main(message) {
         }
 
         if (message.sticker || message.text) {
-            if (replyTo && replyTo.from?.id !== botId) addReply(message);
-            if (!replyTo || replyTo.from?.id === botId) answerUser(message);
+            if (replyTo && replyTo.from?.id !== botId) await addReply(message).catch(() => {});
+            if (!replyTo || replyTo.from?.id === botId) await answerUser(message);
         }
     } catch (err) {
         console.error("[MAIN-ERROR]", err.message);
@@ -620,7 +620,7 @@ async function start(message) {
                     [{ text: "🗃 Comandos do Dev", callback_data: "dev_commands" }],
                 ],
             },
-        });
+        }).catch(() => {});
     } else {
         await bot.sendMessage(message.chat.id, userText, {
             parse_mode: "HTML",
@@ -635,7 +635,7 @@ async function start(message) {
                     [{ text: "📦 Github", url: "https://github.com/leviobrabo/helanagbot" }],
                 ],
             },
-        });
+        }).catch(() => {});
     }
 }
 
