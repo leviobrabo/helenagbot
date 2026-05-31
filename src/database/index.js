@@ -1,10 +1,7 @@
 const mongoose = require("mongoose");
-const dotenv = require("dotenv");
 const MessageSchema = require("./models/message");
 const ChatSchema = require("./models/groups");
 const userSchema = require("./models/users");
-
-dotenv.config();
 
 let reconnectAttempts = 0;
 const MAX_RECONNECT_ATTEMPTS = 10;

@@ -21,6 +21,8 @@ const groupId = process.env.groupId;
 const logMsgId = parseInt(process.env.LOG_MSG_ID) || null;
 const channelStatusId = process.env.channelStatusId;
 
+const REPLY_MAX_SIZE = 50;
+
 let crashCount = 0;
 let lastCrashTime = 0;
 const CRASH_LIMIT = 5;
@@ -52,9 +54,22 @@ process.on("unhandledRejection", (reason) => {
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
+const devSet = new Set(
+  (process.env.DEV_USERS || "").split(",").map(s => s.trim()).filter(Boolean)
+);
+
 function is_dev(user_id) {
-    const devUsers = (process.env.DEV_USERS || "").split(",").map((s) => s.trim());
-    return devUsers.includes(user_id.toString());
+  return devSet.has(user_id.toString());
+}
+
+async function loadDevsFromDB() {
+  try {
+    const dbDevs = await UserModel.find({ is_dev: true }).lean().select("user_id");
+    dbDevs.forEach(d => devSet.add(d.user_id.toString()));
+    console.log(`[DEVS] ${devSet.size} dev(s) carregados (env + DB).`);
+  } catch (err) {
+    console.warn("[DEVS] Erro ao carregar devs do banco:", err.message);
+  }
 }
 
 const forbiddenWords = palavrasProibidas.palavras_proibidas;
@@ -280,6 +295,7 @@ async function addReply(message) {
     : null;
   const replyItem = buildReplyItem(message);
 
+  if (!repliedMessage || !replyItem.value) return;
   if (/^[\/.!]/.test(repliedMessage)) return;
   if (containsUrl(repliedMessage) || (replyItem.type === "text" && containsUrl(replyItem.value))) {
     await deleteMessageIfExists(repliedMessage, replyItem.value);
@@ -411,29 +427,8 @@ async function main(message) {
 
 // ─── user / group registration ────────────────────────────────────────────────
 
-async function saveUserInformation(message) {
-  const user = message.from;
-  if (!user || user.is_bot) return;
-
-  try {
-    const langCode = user.language_code || "unknown";
-    await UserModel.findOneAndUpdate(
-      { user_id: user.id },
-      {
-        $setOnInsert: {
-          user_id: user.id,
-          is_dev: false,
-        },
-        $set: {
-          username: user.username,
-          firstname: user.first_name,
-          lastname: user.last_name,
-          lang_code: langCode,
-        },
-      },
-      { upsert: true }
-    );
-  } catch (err) {}
+function saveUserInformation(message) {
+  ensureUserSaved(message).catch(() => {});
 }
 
 async function saveNewChatMembers(msg) {
@@ -457,9 +452,8 @@ async function saveNewChatMembers(msg) {
       return;
     }
 
-    const isNew = chat.wasNew;
-    const botUser = await bot.getMe();
-    const addedNow = msg.new_chat_members?.some((m) => m.id === botUser.id);
+    const botId = await getBotId();
+    const addedNow = msg.new_chat_members?.some((m) => m.id === botId);
     const chatLink = msg.chat.username ? `@${msg.chat.username}` : "Private Group";
 
     if (addedNow) {
@@ -504,6 +498,7 @@ async function saveNewChatMembers(msg) {
 }
 
 async function removeLeftChatMember(msg) {
+    if (!msg.left_chat_member) return;
     const botId = await getBotId();
     if (msg.left_chat_member.id !== botId) return;
     const chatId = msg.chat.id;
@@ -846,7 +841,7 @@ async function removeMessage(message) {
 
   const exists = await MessageModel.exists({ message: repliedMessage });
   if (!exists) {
-    return console.log("Mensagem não encontrada no banco de dados.");
+    return bot.sendMessage(message.chat.id, "❌ Mensagem não encontrada no banco de dados.");
   }
 
   await MessageModel.deleteMany({
@@ -931,13 +926,6 @@ async function syncdb(message) {
     const sentMsg = await bot.sendMessage(message.chat.id, "🔄 <i>Sincronizando banco de dados...</i>", { parse_mode: "HTML" });
 
     try {
-        // Obter lista de chats do bot
-        const botChats = await bot.getChatAdministrators(-1).catch(() => []);
-        
-        // Nota: getChatAdministrators funciona apenas para grupos específicos
-        // Uma abordagem melhor é usar o histórico de mensagens
-        // Por enquanto, vamos apenas avisar que a sincronização de grupos é feita automaticamente
-        
         const totalUsers = await UserModel.countDocuments();
         const totalGroups = await ChatModel.countDocuments();
         
@@ -1486,6 +1474,8 @@ function registerCallbackHandler() {
           "/ping — Latência e uptime",
           "/delmsg — Apaga mensagem do banco (reply)",
           "/devs — Lista de desenvolvedores",
+          "/adddev &lt;id&gt; — Adiciona usuário como dev",
+          "/rmdev &lt;id&gt; — Remove usuário dos devs",
           "/sendgp — Envia mensagem para todos os grupos",
           "/campaign — Verifica status da campanha atual",
         ];
@@ -1613,8 +1603,6 @@ async function migrateGroupsLangCode() {
   console.log("Migracao de chat_type dos grupos concluida!");
 }
 
-const REPLY_MAX_SIZE = 50;
-
 async function migrateReplyFormat() {
   console.log("[MIGRATE-REPLY] Iniciando migração (batch com cursor)...");
   let processed = 0;
@@ -1666,9 +1654,69 @@ async function migrateReplyFormat() {
   console.log(`[MIGRATE-REPLY] Concluída: ${migrated} migrados de ${processed} total.`);
 }
 
+// ─── /adddev ──────────────────────────────────────────────────────────────────
+
+async function adddev(message) {
+  if (!is_dev(message.from.id)) return;
+  if (message.chat.type !== "private") {
+    return bot.sendMessage(message.chat.id, "Use este comando no PV com o bot.");
+  }
+
+  const rawId = message.text.split(" ")[1];
+  if (!rawId || isNaN(rawId)) {
+    return bot.sendMessage(message.chat.id, "<i>Uso: /adddev &lt;userId&gt;</i>", { parse_mode: "HTML" });
+  }
+
+  const userId = rawId.trim();
+  if (devSet.has(userId)) {
+    return bot.sendMessage(message.chat.id, `Usuário <code>${userId}</code> já é dev.`, { parse_mode: "HTML" });
+  }
+
+  devSet.add(userId);
+  await UserModel.findOneAndUpdate(
+    { user_id: Number(userId) },
+    { $set: { is_dev: true } }
+  ).catch(() => {});
+
+  bot.sendMessage(message.chat.id, `✅ <code>${userId}</code> adicionado como dev.`, { parse_mode: "HTML" });
+}
+
+// ─── /rmdev ───────────────────────────────────────────────────────────────────
+
+async function rmdev(message) {
+  if (!is_dev(message.from.id)) return;
+  if (message.chat.type !== "private") {
+    return bot.sendMessage(message.chat.id, "Use este comando no PV com o bot.");
+  }
+
+  const rawId = message.text.split(" ")[1];
+  if (!rawId || isNaN(rawId)) {
+    return bot.sendMessage(message.chat.id, "<i>Uso: /rmdev &lt;userId&gt;</i>", { parse_mode: "HTML" });
+  }
+
+  const userId = rawId.trim();
+  const isEnvDev = (process.env.DEV_USERS || "").split(",").map(s => s.trim()).includes(userId);
+  if (isEnvDev) {
+    return bot.sendMessage(message.chat.id, "❌ Devs definidos no .env não podem ser removidos pelo bot.", { parse_mode: "HTML" });
+  }
+
+  if (!devSet.has(userId)) {
+    return bot.sendMessage(message.chat.id, `Usuário <code>${userId}</code> não é dev.`, { parse_mode: "HTML" });
+  }
+
+  devSet.delete(userId);
+  await UserModel.findOneAndUpdate(
+    { user_id: Number(userId) },
+    { $set: { is_dev: false } }
+  ).catch(() => {});
+
+  bot.sendMessage(message.chat.id, `✅ <code>${userId}</code> removido dos devs.`, { parse_mode: "HTML" });
+}
+
 // ─── exports ──────────────────────────────────────────────────────────────────
 
 exports.initHandler = () => {
+  loadDevsFromDB().catch(() => {});
   registerCallbackHandler();
 
   bot.on("message", main);
@@ -1677,16 +1725,18 @@ exports.initHandler = () => {
   bot.on("new_chat_members", saveNewChatMembers);
   bot.on("left_chat_member", removeLeftChatMember);
 
-    bot.onText(/^\/start$/, start);
-    bot.onText(/^\/stats$/, stats);
-    bot.onText(/^\/grupos$/, groups);
-    bot.onText(/^\/ban/, ban);
-    bot.onText(/^\/unban/, unban);
-    bot.onText(/^\/banned/, banned);
-    bot.onText(/^\/delmsg/, removeMessage);
-    bot.onText(/^\/devs/, devs);
-    bot.onText(/^\/dbstats/, dbstats);
-    bot.onText(/^\/syncdb/, syncdb);
+  bot.onText(/^\/start$/, start);
+  bot.onText(/^\/stats$/, stats);
+  bot.onText(/^\/grupos$/, groups);
+  bot.onText(/^\/ban/, ban);
+  bot.onText(/^\/unban/, unban);
+  bot.onText(/^\/banned/, banned);
+  bot.onText(/^\/delmsg/, removeMessage);
+  bot.onText(/^\/devs/, devs);
+  bot.onText(/^\/dbstats/, dbstats);
+  bot.onText(/^\/syncdb/, syncdb);
+  bot.onText(/^\/adddev/, adddev);
+  bot.onText(/^\/rmdev/, rmdev);
 
     bot.onText(/\/ping/, async (msg) => {
         const start = new Date();

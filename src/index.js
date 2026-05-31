@@ -23,8 +23,9 @@ process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
 
 initHandler();
 
-const server = http.createServer((request, response) =>
-  response.writeHead(200, { "content-type": "application/json" })
-);
+const server = http.createServer((request, response) => {
+  response.writeHead(200, { "content-type": "application/json" });
+  response.end(JSON.stringify({ status: "ok" }));
+});
 
 server.listen(port);
