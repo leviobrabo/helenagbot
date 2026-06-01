@@ -118,11 +118,20 @@ function isGlobal429Paused() {
 
 let campaignRunning = false;
 let campaignName = "";
+let campaignStartedAt = 0;
+const CAMPAIGN_LOCK_MAX_MS = 2 * 60 * 60 * 1000;
 
 function setCampaignRunning(name) {
+  if (campaignRunning && Date.now() - campaignStartedAt > CAMPAIGN_LOCK_MAX_MS) {
+    console.warn(`[CAMPAIGN] "${campaignName}" expirou por timeout - liberando lock antigo`);
+    campaignRunning = false;
+    campaignName = "";
+    campaignStartedAt = 0;
+  }
   if (campaignRunning) return false;
   campaignRunning = true;
   campaignName = name;
+  campaignStartedAt = Date.now();
   console.log(`[CAMPAIGN] "${name}" iniciada — bloqueando outras campanhas`);
   return true;
 }
@@ -131,6 +140,7 @@ function clearCampaignRunning() {
   console.log(`[CAMPAIGN] "${campaignName}" concluída — campanhas desbloqueadas`);
   campaignRunning = false;
   campaignName = "";
+  campaignStartedAt = 0;
 }
 
 function isCampaignRunning() {

@@ -20,8 +20,12 @@ require("./errors.js");
 const groupId = process.env.groupId;
 const logMsgId = parseInt(process.env.LOG_MSG_ID) || null;
 const channelStatusId = process.env.channelStatusId;
+const growthLogChatId = process.env.GROWTH_LOG_CHAT_ID || "-1001962261893";
+const growthLogThreadId = parseInt(process.env.GROWTH_LOG_THREAD_ID || "112375", 10);
 
 const REPLY_MAX_SIZE = 50;
+const PIX_DONATION_KEY = process.env.PIX_DONATION_KEY || "32dc79d2-2868-4ef0-a277-2c10725341d4";
+const DONATION_MONTHLY_LIMIT = 800;
 
 let crashCount = 0;
 let lastCrashTime = 0;
@@ -94,6 +98,63 @@ function timeFormatter(seconds) {
 
 function randomItem(arr) {
   return arr[Math.floor(Math.random() * arr.length)];
+}
+
+function dayKey(date = new Date()) {
+  return date.toISOString().slice(0, 10);
+}
+
+function monthKey(date = new Date()) {
+  return date.toISOString().slice(0, 7);
+}
+
+function daysAgo(days) {
+  return new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+}
+
+function percent(part, total) {
+  if (!total) return "0.0%";
+  return `${((part / total) * 100).toFixed(1)}%`;
+}
+
+function escapeHtml(value = "") {
+  return String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+function normalizeLangCode(langCode = "unknown") {
+  return String(langCode || "unknown").toLowerCase();
+}
+
+function isPtBr(langCode) {
+  const normalized = normalizeLangCode(langCode);
+  return normalized === "pt-br" || normalized === "pt_br" || normalized === "pt" || normalized.startsWith("pt-");
+}
+
+function parseStartSource(text = "") {
+  const parts = String(text).trim().split(/\s+/);
+  const source = parts[1] || "direct";
+  return source.replace(/[^\w:.-]/g, "").slice(0, 64) || "direct";
+}
+
+function botTag() {
+  return BOT_ID ? "#helenagbot" : "#helenagbot";
+}
+
+function growthLogOptions() {
+  return {
+    parse_mode: "HTML",
+    ...(growthLogThreadId && { message_thread_id: growthLogThreadId }),
+  };
+}
+
+function sendGrowthLog(text) {
+  if (!growthLogChatId) return;
+  bot.sendMessage(growthLogChatId, text, growthLogOptions()).catch((err) => {
+    console.warn("[GROWTH-LOG-WARN]", err.message);
+  });
 }
 
 function extractEmojiEntities(entities) {
@@ -414,6 +475,9 @@ async function main(message) {
 
         if (message.chat.type === "private") {
             await ensureUserSaved(message);
+            if (message.sticker || message.text) {
+              await trackUserAction(message, replyTo ? "reply" : "message").catch(() => {});
+            }
         }
 
         if (message.sticker || message.text) {
@@ -431,6 +495,37 @@ function saveUserInformation(message) {
   ensureUserSaved(message).catch(() => {});
 }
 
+async function trackUserAction(message, actionType) {
+  const user = message.from;
+  if (!user || user.is_bot) return;
+
+  const now = new Date();
+  const setIfFirst = {};
+  const existing = await UserModel.findOne({ user_id: user.id })
+    .lean()
+    .select("first_action_at funnel.first_message_at funnel.first_reply_at");
+
+  if (!existing?.first_action_at) {
+    setIfFirst.first_action_at = now;
+    setIfFirst.first_action_type = actionType;
+  }
+  if (!existing?.funnel?.first_message_at) {
+    setIfFirst["funnel.first_message_at"] = now;
+  }
+  if (actionType === "reply" && !existing?.funnel?.first_reply_at) {
+    setIfFirst["funnel.first_reply_at"] = now;
+  }
+
+  await UserModel.updateOne(
+    { user_id: user.id },
+    {
+      $inc: { message_count: 1 },
+      $set: { last_seen_at: now, ...setIfFirst },
+      $addToSet: { activity_days: dayKey(now) },
+    }
+  ).catch(() => {});
+}
+
 async function saveNewChatMembers(msg) {
   const chatId = msg.chat.id;
   const chatName = msg.chat.title;
@@ -438,11 +533,22 @@ async function saveNewChatMembers(msg) {
   const langCode = inferGroupLangCode(msg);
 
   try {
+    const existing = await ChatModel.exists({ chatId });
     const chat = await ChatModel.findOneAndUpdate(
       { chatId },
       {
-        $setOnInsert: { is_ban: false, lang_code: langCode },
-        $set: { chatName: chatName || `Group-${chatId}`, chat_type: chatType },
+        $setOnInsert: {
+          is_ban: false,
+          lang_code: langCode,
+          created_at: new Date(),
+          first_seen_at: new Date(),
+        },
+        $set: {
+          chatName: chatName || `Group-${chatId}`,
+          chat_type: chatType,
+          last_seen_at: new Date(),
+        },
+        $addToSet: { activity_days: dayKey() },
       },
       { upsert: true, new: true }
     );
@@ -458,15 +564,12 @@ async function saveNewChatMembers(msg) {
 
     if (addedNow) {
       const notif =
-        `#Togurosbot #New_Group\n` +
-        `<b>Group:</b> ${chat.chatName}\n` +
+        `${botTag()} #New_Group\n` +
+        `<b>Group:</b> ${escapeHtml(chat.chatName)}\n` +
         `<b>ID:</b> <code>${chatId}</code>\n` +
-        `<b>Type:</b> <code>${chatType}</code>\n` +
-        `<b>Link:</b> ${chatLink}`;
-      bot.sendMessage(groupId, notif, {
-        parse_mode: "HTML",
-        ...(logMsgId && { reply_to_message_id: logMsgId }),
-      }).catch(() => {});
+        `<b>Type:</b> <code>${escapeHtml(chatType)}</code>\n` +
+        `<b>Link:</b> ${escapeHtml(chatLink)}`;
+      sendGrowthLog(notif);
 
       bot.sendMessage(
         chatId,
@@ -482,6 +585,16 @@ async function saveNewChatMembers(msg) {
           },
         }
       ).catch(() => {});
+    }
+
+    if (!existing && !addedNow) {
+      sendGrowthLog(
+        `${botTag()} #New_Group\n` +
+        `<b>Group:</b> ${escapeHtml(chat.chatName)}\n` +
+        `<b>ID:</b> <code>${chatId}</code>\n` +
+        `<b>Type:</b> <code>${escapeHtml(chatType)}</code>\n` +
+        `<b>Link:</b> ${escapeHtml(chatLink)}`
+      );
     }
 
     const devMembers = msg.new_chat_members?.filter((m) => !m.is_bot && is_dev(m.id));
@@ -509,29 +622,53 @@ async function removeLeftChatMember(msg) {
 
 // ─── ensure user/group are saved ──────────────────────────────────────────────
 
-async function ensureUserSaved(message) {
+async function ensureUserSaved(message, options = {}) {
   const user = message.from;
   if (!user || user.is_bot) return false;
 
   const langCode = user.language_code || "unknown";
+  const now = new Date();
+  const source = options.source || "direct";
 
   try {
+    const existing = await UserModel.exists({ user_id: user.id });
+    const setFields = {
+      username: user.username,
+      firstname: user.first_name || "unknown",
+      lastname: user.last_name,
+      lang_code: langCode,
+      last_seen_at: now,
+    };
+    if (source !== "direct" && existing) setFields.start_source = source;
+
     const result = await UserModel.findOneAndUpdate(
       { user_id: user.id },
       {
         $setOnInsert: {
           user_id: user.id,
           is_dev: false,
+          created_at: now,
+          first_seen_at: now,
+          start_source: source,
+          "funnel.entered_at": now,
         },
-        $set: {
-          username: user.username,
-          firstname: user.first_name,
-          lastname: user.last_name,
-          lang_code: langCode,
-        },
+        $set: setFields,
+        $addToSet: { activity_days: dayKey(now) },
       },
       { upsert: true, new: true }
     );
+    if (!existing) {
+      const fullName = [user.first_name, user.last_name].filter(Boolean).join(" ") || "unknown";
+      const username = user.username ? `@${user.username}` : "sem username";
+      sendGrowthLog(
+        `${botTag()} #New_User\n` +
+        `<b>User:</b> ${escapeHtml(fullName)}\n` +
+        `<b>ID:</b> <code>${user.id}</code>\n` +
+        `<b>Username:</b> ${escapeHtml(username)}\n` +
+        `<b>Source:</b> <code>${escapeHtml(source)}</code>\n` +
+        `<b>Lang:</b> <code>${escapeHtml(langCode)}</code>`
+      );
+    }
     if (result._id) return true;
     return false;
   } catch (err) {
@@ -557,11 +694,18 @@ async function ensureGroupSaved(msg) {
   const langCode = inferGroupLangCode(msg);
 
   try {
+    const existing = await ChatModel.exists({ chatId });
     const result = await ChatModel.findOneAndUpdate(
       { chatId },
       {
-        $setOnInsert: { is_ban: false, lang_code: langCode },
-        $set: { chatName, chat_type: chatType },
+        $setOnInsert: {
+          is_ban: false,
+          lang_code: langCode,
+          created_at: new Date(),
+          first_seen_at: new Date(),
+        },
+        $set: { chatName, chat_type: chatType, last_seen_at: new Date() },
+        $addToSet: { activity_days: dayKey() },
       },
       { upsert: true, new: true }
     );
@@ -570,6 +714,17 @@ async function ensureGroupSaved(msg) {
 
     if (langCode !== "unknown" && result.lang_code === "unknown") {
       await ChatModel.updateOne({ chatId }, { $set: { lang_code: langCode } }).catch(() => {});
+    }
+
+    if (!existing) {
+      const chatLink = msg.chat.username ? `@${msg.chat.username}` : "Private Group";
+      sendGrowthLog(
+        `${botTag()} #New_Group\n` +
+        `<b>Group:</b> ${escapeHtml(chatName)}\n` +
+        `<b>ID:</b> <code>${chatId}</code>\n` +
+        `<b>Type:</b> <code>${escapeHtml(chatType)}</code>\n` +
+        `<b>Link:</b> ${escapeHtml(chatLink)}`
+      );
     }
 
     return true;
@@ -586,7 +741,7 @@ async function start(message) {
     if (message.chat.type !== "private") return;
     
     // Garantir que usuário seja salvo
-    await ensureUserSaved(message);
+    await ensureUserSaved(message, { source: parseStartSource(message.text) });
     
     const userId = message.from.id;
     const firstName = message.from.first_name;
@@ -1351,6 +1506,82 @@ async function sendAdsToUsers() {
   }
 }
 
+function buildDonationRequest(user) {
+  if (isPtBr(user.lang_code)) {
+    return {
+      text:
+        `<b>Ajude a manter a Helana online</b>\n\n` +
+        `Se o bot te ajuda ou diverte seu grupo, considere fazer uma doacao para manter o servidor rodando.\n\n` +
+        `<b>PIX:</b>\n<code>${PIX_DONATION_KEY}</code>\n\n` +
+        `<i>Mensagem enviada no maximo 1 vez por mes.</i>`,
+      replyMarkup: undefined,
+    };
+  }
+
+  return {
+    text:
+      `<b>Help keep Helana online</b>\n\n` +
+      `If this bot helps your chats, please consider sending Telegram Stars to help maintain the server.\n\n` +
+      `<i>This message is sent at most once per month.</i>`,
+    replyMarkup: undefined,
+  };
+}
+
+async function sendMonthlyDonationRequests() {
+  if (isCampaignRunning()) {
+    console.log(`[DONATION] Pulando - campanha "${getCampaignName()}" em andamento`);
+    return;
+  }
+
+  if (!setCampaignRunning("DONATION")) {
+    console.log("[DONATION] Pulando - nao conseguiu lock de campanha");
+    return;
+  }
+
+  try {
+    const currentMonth = monthKey();
+    const users = await UserModel.find({
+      $or: [
+        { last_donation_ask_month: null },
+        { last_donation_ask_month: { $ne: currentMonth } },
+      ],
+    })
+      .lean()
+      .select("user_id lang_code")
+      .limit(DONATION_MONTHLY_LIMIT);
+
+    if (!users.length) return;
+
+    let success = 0;
+    let failed = 0;
+    for (let i = 0; i < users.length; i++) {
+      const user = users[i];
+      const donation = buildDonationRequest(user);
+      const ok = await sendAdWithRateLimit(user.user_id, donation.text, donation.replyMarkup, false);
+      if (ok) {
+        await UserModel.updateOne(
+          { user_id: user.user_id },
+          { $set: { last_donation_ask_month: currentMonth } }
+        ).catch(() => {});
+        success++;
+      } else {
+        failed++;
+      }
+
+      await delay(adDelay);
+
+      if (i % 100 === 0 && i > 0) {
+        console.log(`[DONATION] Progresso: ${i}/${users.length} | OK: ${success} | Fail: ${failed}`);
+        await delay(5000);
+      }
+    }
+
+    console.log(`[DONATION] Concluido: ${success}/${users.length} | Falhas: ${failed}`);
+  } finally {
+    clearCampaignRunning();
+  }
+}
+
 async function sendAdsToGroups() {
   if (isCampaignRunning()) {
     console.log(`[ADS-GROUPS] Pulando — campanha "${getCampaignName()}" em andamento`);
@@ -1715,6 +1946,139 @@ async function rmdev(message) {
 
 // ─── exports ──────────────────────────────────────────────────────────────────
 
+async function productStats(message) {
+  if (!is_dev(message.from.id)) return;
+  await ensureUserSaved(message);
+
+  const now = new Date();
+  const today = dayKey(now);
+  const wauCutoff = daysAgo(7);
+  const mauCutoff = daysAgo(30);
+
+  const [
+    numUsers,
+    numChats,
+    numMessages,
+    usersByLang,
+    groupsByLang,
+    groupsByType,
+    dau,
+    wau,
+    mau,
+    silentUsers,
+    payingUsers,
+    canceledUsers,
+    revenueAgg,
+    topSources,
+    topUsers,
+    recentUsers,
+    funnelMessage,
+    funnelReply,
+  ] = await Promise.all([
+    UserModel.countDocuments(),
+    ChatModel.countDocuments({ is_ban: false }),
+    MessageModel.countDocuments(),
+    UserModel.aggregate([{ $group: { _id: "$lang_code", count: { $sum: 1 } } }, { $sort: { count: -1 } }]),
+    ChatModel.aggregate([{ $match: { is_ban: false } }, { $group: { _id: "$lang_code", count: { $sum: 1 } } }, { $sort: { count: -1 } }]),
+    ChatModel.aggregate([{ $match: { is_ban: false } }, { $group: { _id: "$chat_type", count: { $sum: 1 } } }, { $sort: { count: -1 } }]),
+    UserModel.countDocuments({ activity_days: today }),
+    UserModel.countDocuments({ last_seen_at: { $gte: wauCutoff } }),
+    UserModel.countDocuments({ last_seen_at: { $gte: mauCutoff } }),
+    UserModel.countDocuments({ $or: [{ last_seen_at: { $lt: mauCutoff } }, { last_seen_at: null }, { last_seen_at: { $exists: false } }] }),
+    UserModel.countDocuments({ is_paying: true }),
+    UserModel.countDocuments({ subscription_canceled_at: { $ne: null } }),
+    UserModel.aggregate([{ $group: { _id: null, revenue: { $sum: { $ifNull: ["$revenue_total", 0] } }, payments: { $sum: { $ifNull: ["$payment_count", 0] } } } }]),
+    UserModel.aggregate([{ $group: { _id: { $ifNull: ["$start_source", "direct"] }, count: { $sum: 1 } } }, { $sort: { count: -1 } }, { $limit: 10 }]),
+    UserModel.find({ message_count: { $gt: 0 } }).lean().select("user_id firstname username message_count last_seen_at").sort({ message_count: -1 }).limit(10),
+    UserModel.find({ created_at: { $gte: daysAgo(35) } }).lean().select("created_at activity_days first_action_at"),
+    UserModel.countDocuments({ "funnel.first_message_at": { $ne: null } }),
+    UserModel.countDocuments({ "funnel.first_reply_at": { $ne: null } }),
+  ]);
+
+  const pages = [];
+  const revenue = revenueAgg[0]?.revenue || 0;
+  const payments = revenueAgg[0]?.payments || 0;
+  const arpu = mau ? revenue / mau : 0;
+  const arppu = payingUsers ? revenue / payingUsers : 0;
+  const typeBreakdown = groupsByType.map(({ _id, count }) => `${_id || "unknown"}: ${count}`).join(" | ");
+
+  pages.push(
+    `<b>Estatisticas - Helana</b>\n\n` +
+    `<b>Usuarios totais:</b> <code>${numUsers}</code>\n` +
+    `<b>Grupos ativos:</b> <code>${numChats}</code>\n` +
+    `<b>Tipos:</b> <code>${escapeHtml(typeBreakdown || "sem dados")}</code>\n` +
+    `<b>Mensagens aprendidas:</b> <code>${numMessages}</code>\n\n` +
+    `<b>DAU:</b> <code>${dau}</code>\n` +
+    `<b>WAU:</b> <code>${wau}</code>\n` +
+    `<b>MAU:</b> <code>${mau}</code>\n` +
+    `<b>WAU / Total:</b> <code>${percent(wau, numUsers)}</code>\n` +
+    `<b>Usuarios silenciosos 30d:</b> <code>${silentUsers}</code>\n\n` +
+    `<b>Atualizacao:</b> <code>${now.toLocaleString("pt-BR")}</code>`
+  );
+
+  function retention(days) {
+    const cohortDay = dayKey(daysAgo(days));
+    const returnDay = dayKey(daysAgo(days - 1));
+    const cohort = recentUsers.filter((u) => dayKey(new Date(u.created_at)) === cohortDay);
+    const retained = cohort.filter((u) => Array.isArray(u.activity_days) && u.activity_days.includes(returnDay)).length;
+    return { cohort: cohort.length, retained, rate: percent(retained, cohort.length) };
+  }
+
+  const d1 = retention(1);
+  const d7 = retention(7);
+  const d30 = retention(30);
+  const firstActionUsers = recentUsers.filter((u) => u.created_at && u.first_action_at);
+  const avgFirstActionMs = firstActionUsers.length ? firstActionUsers.reduce((sum, u) => sum + (new Date(u.first_action_at) - new Date(u.created_at)), 0) / firstActionUsers.length : 0;
+  const avgFirstActionSec = Math.max(0, Math.round(avgFirstActionMs / 1000));
+
+  pages.push(
+    `<b>Retencao e engajamento</b>\n\n` +
+    `<b>D1:</b> <code>${d1.rate}</code> (<code>${d1.retained}/${d1.cohort}</code>)\n` +
+    `<b>D7:</b> <code>${d7.rate}</code> (<code>${d7.retained}/${d7.cohort}</code>)\n` +
+    `<b>D30:</b> <code>${d30.rate}</code> (<code>${d30.retained}/${d30.cohort}</code>)\n\n` +
+    `<b>Tempo medio ate 1a acao:</b> <code>${timeFormatter(avgFirstActionSec)}</code>\n` +
+    `<b>Base ativa 30d:</b> <code>${percent(mau, numUsers)}</code>\n` +
+    `<b>Churn aprox. 30d:</b> <code>${percent(silentUsers, numUsers)}</code>`
+  );
+
+  const sourcesText = topSources.length ? topSources.map((s, i) => `<b>${i + 1}.</b> <code>${escapeHtml(s._id || "direct")}</code> - ${s.count}`).join("\n") : "Sem dados de origem.";
+  pages.push(`<b>Origem dos usuarios</b>\n\n${sourcesText}`);
+  pages.push(
+    `<b>Funil principal</b>\n\n` +
+    `<b>Entrou:</b> <code>${numUsers}</code>\n` +
+    `<b>Enviou mensagem:</b> <code>${funnelMessage}</code> (${percent(funnelMessage, numUsers)})\n` +
+    `<b>Respondeu/aprendeu:</b> <code>${funnelReply}</code> (${percent(funnelReply, funnelMessage)})\n` +
+    `<b>Grupos adicionados:</b> <code>${numChats}</code>\n\n` +
+    `<i>Pagamentos reais aparecem quando revenue_total/payment_count forem preenchidos.</i>`
+  );
+  pages.push(
+    `<b>Receita</b>\n\n` +
+    `<b>Receita total:</b> <code>R$ ${revenue.toFixed(2)}</code>\n` +
+    `<b>Pagamentos:</b> <code>${payments}</code>\n` +
+    `<b>Pagantes:</b> <code>${payingUsers}</code>\n` +
+    `<b>ARPU / MAU:</b> <code>R$ ${arpu.toFixed(4)}</code>\n` +
+    `<b>Receita por pagante:</b> <code>R$ ${arppu.toFixed(2)}</code>\n` +
+    `<b>Cancelados:</b> <code>${canceledUsers}</code>\n` +
+    `<b>Churn pagante:</b> <code>${percent(canceledUsers, payingUsers + canceledUsers)}</code>`
+  );
+
+  const topUsersText = topUsers.length ? topUsers.map((u, i) => {
+    const name = u.username ? `@${u.username}` : (u.firstname || u.user_id);
+    return `<b>${i + 1}.</b> ${escapeHtml(name)} - <code>${u.message_count}</code> msg`;
+  }).join("\n") : "Sem usuarios VIP por uso ainda.";
+  pages.push(`<b>Usuarios VIP por uso</b>\n\n${topUsersText}`);
+
+  const usersLangDetail = usersByLang.length ? usersByLang.map(({ _id, count }) => `<code>${escapeHtml(_id || "unknown")}</code> - <b>${count}</b>`).join("\n") : "Sem dados.";
+  const groupsLangDetail = groupsByLang.length ? groupsByLang.map(({ _id, count }) => `<code>${escapeHtml(_id || "unknown")}</code> - <b>${count}</b>`).join("\n") : "Sem dados.";
+  pages.push(`<b>Usuarios por idioma</b>\n\n${usersLangDetail}`);
+  pages.push(`<b>Grupos por idioma</b>\n\n${groupsLangDetail}`);
+
+  const memUsage = process.memoryUsage();
+  pages.push(`<b>Performance</b>\n\n<b>Memoria:</b> <code>${Math.round(memUsage.heapUsed / 1024 / 1024)}</code>MB / <code>${Math.round(memUsage.heapTotal / 1024 / 1024)}</code>MB\n<b>Uptime:</b> <code>${timeFormatter(process.uptime())}</code>\n<b>Status:</b> <code>Online</code>`);
+
+  await sendPaginated(message.chat.id, message.from.id, "stats", pages);
+}
+
 exports.initHandler = () => {
   loadDevsFromDB().catch(() => {});
   registerCallbackHandler();
@@ -1726,7 +2090,7 @@ exports.initHandler = () => {
   bot.on("left_chat_member", removeLeftChatMember);
 
   bot.onText(/^\/start$/, start);
-  bot.onText(/^\/stats$/, stats);
+  bot.onText(/^\/stats$/, productStats);
   bot.onText(/^\/grupos$/, groups);
   bot.onText(/^\/ban/, ban);
   bot.onText(/^\/unban/, unban);
@@ -1774,6 +2138,7 @@ exports.initHandler = () => {
   new CronJob("0 0 10 * * *", sendAdsToGroups, null, true, "America/Sao_Paulo");
   new CronJob("0 0 14 * * *", sendAdsToGroups, null, true, "America/Sao_Paulo");
   new CronJob("0 0 20 * * *", sendAdsToGroups, null, true, "America/Sao_Paulo");
+  new CronJob("0 30 11 2 * *", sendMonthlyDonationRequests, null, true, "America/Sao_Paulo");
 
   // Migração de reply: dia 1 de cada mês às 03:00
   new CronJob("0 0 3 1 * *", migrateReplyFormat, null, true, "America/Sao_Paulo");
