@@ -125,7 +125,86 @@ function escapeHtml(value = "") {
 }
 
 function normalizeLangCode(langCode = "unknown") {
-  return String(langCode || "unknown").toLowerCase();
+  const normalized = String(langCode || "unknown")
+    .trim()
+    .toLowerCase()
+    .replace(/_/g, "-")
+    .replace(/[^a-z0-9-]/g, "")
+    .slice(0, 16);
+  return normalized || "unknown";
+}
+
+function interfaceLang(langCode = "unknown") {
+  const normalized = normalizeLangCode(langCode);
+  if (normalized === "pt-br" || normalized === "pt" || normalized.startsWith("pt-")) return "pt-br";
+  if (normalized === "es" || normalized.startsWith("es-")) return "es";
+  return "en";
+}
+
+const I18N = {
+  "pt-br": {
+    startDev: (name) => `Ola, <b>${name}</b>! Voce e um dos desenvolvedores.\n\nVoce esta no painel da Helana. Use os comandos com responsabilidade.`,
+    startUser: (name) => `Ola, <b>${name}</b>!\n\nEu sou <b>Helana</b>, um bot que responde mensagens, audios e figurinhas da galera.\n\n<b>Novidades do bot:</b> <a href="https://t.me/lbrabo">@lbrabo</a>\n<b>Cursos:</b> <a href="https://t.me/cursobroff">@cursobroff</a>`,
+    addGroup: "Adicionar ao grupo",
+    channel: "Canal",
+    support: "Suporte",
+    devCommands: "Comandos do Dev",
+    currentLang: (lang) => `Idioma atual: <code>${lang}</code>\nUse: <code>/lang pt-br</code>`,
+    currentGroupLang: (lang) => `Idioma do grupo: <code>${lang}</code>\nUse: <code>/lang pt-br</code>`,
+    langSet: (lang) => `Idioma definido para <code>${lang}</code>.`,
+    groupLangSet: (lang) => `Idioma do grupo definido para <code>${lang}</code>.`,
+    groupLangAdminOnly: "Apenas admins do grupo podem alterar o idioma.",
+    replyToDelete: "Responda a uma mensagem para deletar do banco.",
+    messageNotFound: "Mensagem nao encontrada no banco de dados.",
+    deleted: (name, id) => `Deletado por <a href="tg://user?id=${id}">${name}</a>.\n\nTodas as respostas associadas foram apagadas.`,
+    devOnly: "Este comando e apenas para desenvolvedores.",
+    privateOnly: "Use este comando no PV com o bot.",
+    unauthorized: "Voce nao esta autorizado.",
+  },
+  es: {
+    startDev: (name) => `Hola, <b>${name}</b>. Eres uno de los desarrolladores.\n\nEstas en el panel de Helana. Usa los comandos con responsabilidad.`,
+    startUser: (name) => `Hola, <b>${name}</b>.\n\nSoy <b>Helana</b>, un bot que responde mensajes, audios y stickers.\n\n<b>Novedades del bot:</b> <a href="https://t.me/lbrabo">@lbrabo</a>\n<b>Cursos:</b> <a href="https://t.me/cursobroff">@cursobroff</a>`,
+    addGroup: "Agregar al grupo",
+    channel: "Canal",
+    support: "Soporte",
+    devCommands: "Comandos dev",
+    currentLang: (lang) => `Idioma actual: <code>${lang}</code>\nUsa: <code>/lang es</code>`,
+    currentGroupLang: (lang) => `Idioma del grupo: <code>${lang}</code>\nUsa: <code>/lang es</code>`,
+    langSet: (lang) => `Idioma definido como <code>${lang}</code>.`,
+    groupLangSet: (lang) => `Idioma del grupo definido como <code>${lang}</code>.`,
+    groupLangAdminOnly: "Solo los admins del grupo pueden cambiar el idioma.",
+    replyToDelete: "Responde a un mensaje para borrarlo de la base de datos.",
+    messageNotFound: "Mensaje no encontrado en la base de datos.",
+    deleted: (name, id) => `Borrado por <a href="tg://user?id=${id}">${name}</a>.\n\nTodas las respuestas asociadas fueron eliminadas.`,
+    devOnly: "Este comando es solo para desarrolladores.",
+    privateOnly: "Usa este comando en privado con el bot.",
+    unauthorized: "No tienes autorizacion.",
+  },
+  en: {
+    startDev: (name) => `Hi, <b>${name}</b>. You are one of the developers.\n\nYou are in Helana's panel. Use the commands responsibly.`,
+    startUser: (name) => `Hi, <b>${name}</b>.\n\nI am <b>Helana</b>, a bot that replies to messages, audio and stickers.\n\n<b>Bot updates:</b> <a href="https://t.me/lbrabo">@lbrabo</a>\n<b>Courses:</b> <a href="https://t.me/cursobroff">@cursobroff</a>`,
+    addGroup: "Add to group",
+    channel: "Channel",
+    support: "Support",
+    devCommands: "Dev commands",
+    currentLang: (lang) => `Current language: <code>${lang}</code>\nUse: <code>/lang en</code>`,
+    currentGroupLang: (lang) => `Group language: <code>${lang}</code>\nUse: <code>/lang en</code>`,
+    langSet: (lang) => `Language set to <code>${lang}</code>.`,
+    groupLangSet: (lang) => `Group language set to <code>${lang}</code>.`,
+    groupLangAdminOnly: "Only group admins can change the language.",
+    replyToDelete: "Reply to a message to delete it from the database.",
+    messageNotFound: "Message not found in the database.",
+    deleted: (name, id) => `Deleted by <a href="tg://user?id=${id}">${name}</a>.\n\nAll associated replies were removed.`,
+    devOnly: "This command is only for developers.",
+    privateOnly: "Use this command in a private chat with the bot.",
+    unauthorized: "You are not authorized.",
+  },
+};
+
+function t(message, key, ...args) {
+  const dict = I18N[interfaceLang(message.from?.language_code)] || I18N.en;
+  const value = dict[key] ?? I18N.en[key];
+  return typeof value === "function" ? value(...args) : value;
 }
 
 function isPtBr(langCode) {
@@ -180,6 +259,36 @@ function buildReplyItem(message) {
   return { type: "text", value: text, emoji_entities: [] };
 }
 
+function compactEmojiEntities(emojiEntities) {
+  if (!Array.isArray(emojiEntities) || !emojiEntities.length) return undefined;
+  return emojiEntities.map((e) => ({
+    o: e.offset,
+    l: e.length || 2,
+    i: e.custom_emoji_id,
+  }));
+}
+
+function expandEmojiEntities(emojiEntities) {
+  if (!Array.isArray(emojiEntities) || !emojiEntities.length) return [];
+  return emojiEntities.map((e) => ({
+    offset: e.offset ?? e.o,
+    length: e.length ?? e.l ?? 2,
+    custom_emoji_id: e.custom_emoji_id ?? e.i,
+  })).filter((e) => e.custom_emoji_id);
+}
+
+function toStoredReplyItem(item) {
+  if (!item || !item.value) return null;
+  const stored = { v: item.value };
+  if (item.type === "sticker") stored.t = 1;
+  if (item.type === "custom_emoji") {
+    stored.t = 2;
+    const compactEntities = compactEmojiEntities(item.emoji_entities);
+    if (compactEntities) stored.e = compactEntities;
+  }
+  return stored;
+}
+
 function buildMessageKey(message) {
   if (message.sticker) return message.sticker.file_unique_id;
   return message.text || "";
@@ -187,7 +296,7 @@ function buildMessageKey(message) {
 
 function buildEntitiesFromStored(emojiEntities) {
   if (!emojiEntities || !emojiEntities.length) return undefined;
-  return emojiEntities.map((e) => ({
+  return expandEmojiEntities(emojiEntities).map((e) => ({
     offset: e.offset,
     length: e.length,
     type: "custom_emoji",
@@ -198,6 +307,7 @@ function buildEntitiesFromStored(emojiEntities) {
 function normalizeReplyItem(raw) {
   // Converte subdocument Mongoose para objeto puro (expõe propriedades internas)
   const item = (raw && typeof raw.toObject === "function") ? raw.toObject() : raw;
+  if (!item) return null;
 
   if (typeof item === "string" || item instanceof String) {
     const isStickerFileId = /^[A-Za-z0-9_-]{30,}$/.test(item);
@@ -210,6 +320,10 @@ function normalizeReplyItem(raw) {
     const str = chars.join("");
     const isStickerFileId = /^[A-Za-z0-9_-]{30,}$/.test(str);
     return { type: isStickerFileId ? "sticker" : "text", value: str, emoji_entities: [] };
+  }
+  if (item.v) {
+    const type = item.t === 1 ? "sticker" : item.t === 2 ? "custom_emoji" : "text";
+    return { type, value: item.v, emoji_entities: expandEmojiEntities(item.e) };
   }
   if (item.custom_emoji_ids && !item.emoji_entities) {
     item.emoji_entities = [];
@@ -323,58 +437,85 @@ async function sendPaginated(chatId, userId, type, pages) {
 
 // ─── learning system ──────────────────────────────────────────────────────────
 
-async function deleteMessageIfExists(repliedMessage, replyValue) {
+function isGroupMessage(message) {
+  return message.chat.type === "group" || message.chat.type === "supergroup";
+}
+
+async function getLearningLang(message, savedGroup = null) {
+  if (isGroupMessage(message)) {
+    const group = savedGroup || await ensureGroupSaved(message);
+    if (!group) return null;
+    const groupLang = normalizeLangCode(group.lang_code);
+    if (groupLang !== "unknown") return groupLang;
+    return normalizeLangCode(inferGroupLangCode(message));
+  }
+  const user = message.from?.id
+    ? await UserModel.findOne({ user_id: message.from.id }).lean().select("lang_code")
+    : null;
+  return normalizeLangCode(user?.lang_code || message.from?.language_code);
+}
+
+async function deleteMessageIfExists(repliedMessage, replyValue, langCode) {
+  const lang = normalizeLangCode(langCode);
   const found = await MessageModel.findOne({
-    $or: [{ message: repliedMessage }, { "reply.value": replyValue }],
+    l: lang,
+    $or: [{ m: repliedMessage }, { "r.v": replyValue }],
   });
   if (found) await MessageModel.deleteOne({ _id: found._id });
 }
 
-async function createMessageAndAddReply(message) {
+async function createMessageAndAddReply(message, langCode) {
   const repliedMessage = message.reply_to_message
     ? buildMessageKey(message.reply_to_message)
     : null;
   const replyItem = buildReplyItem(message);
+  const storedReplyItem = toStoredReplyItem(replyItem);
+  const lang = normalizeLangCode(langCode);
 
-  if (!repliedMessage || !replyItem.value) return;
+  if (!repliedMessage || !replyItem.value || !storedReplyItem || !lang) return;
   if (/^[\/.!]/.test(repliedMessage) || (/^[\/.!]/.test(replyItem.value) && replyItem.type === "text")) return;
   if (containsUrl(repliedMessage) || (replyItem.type === "text" && containsUrl(replyItem.value))) {
-    await deleteMessageIfExists(repliedMessage, replyItem.value);
+    await deleteMessageIfExists(repliedMessage, replyItem.value, lang);
     return;
   }
   if (hasForbiddenWord(repliedMessage) || (replyItem.type === "text" && hasForbiddenWord(replyItem.value))) {
-    await deleteMessageIfExists(repliedMessage, replyItem.value);
+    await deleteMessageIfExists(repliedMessage, replyItem.value, lang);
     return;
   }
 
-  await new MessageModel({ message: repliedMessage, reply: [replyItem] }).save().catch(() => {});
+  await new MessageModel({ l: lang, m: repliedMessage, r: [storedReplyItem] }).save().catch(() => {});
 }
 
 async function addReply(message) {
+  const group = isGroupMessage(message) ? await ensureGroupSaved(message) : null;
+  if (isGroupMessage(message) && !group) return;
+  const lang = await getLearningLang(message, group);
+  if (!lang) return;
   const repliedMessage = message.reply_to_message
     ? buildMessageKey(message.reply_to_message)
     : null;
   const replyItem = buildReplyItem(message);
+  const storedReplyItem = toStoredReplyItem(replyItem);
 
-  if (!repliedMessage || !replyItem.value) return;
+  if (!repliedMessage || !replyItem.value || !storedReplyItem) return;
   if (/^[\/.!]/.test(repliedMessage)) return;
   if (containsUrl(repliedMessage) || (replyItem.type === "text" && containsUrl(replyItem.value))) {
-    await deleteMessageIfExists(repliedMessage, replyItem.value);
+    await deleteMessageIfExists(repliedMessage, replyItem.value, lang);
     return;
   }
   if (hasForbiddenWord(repliedMessage) || (replyItem.type === "text" && hasForbiddenWord(replyItem.value))) {
-    await deleteMessageIfExists(repliedMessage, replyItem.value);
+    await deleteMessageIfExists(repliedMessage, replyItem.value, lang);
     return;
   }
 
-  const exists = await MessageModel.exists({ message: repliedMessage });
+  const exists = await MessageModel.exists({ l: lang, m: repliedMessage });
   if (exists) {
     await MessageModel.findOneAndUpdate(
-      { message: repliedMessage },
-      { $push: { reply: { $each: [replyItem], $slice: REPLY_MAX_SIZE } } }
+      { l: lang, m: repliedMessage },
+      { $push: { r: { $each: [storedReplyItem], $slice: REPLY_MAX_SIZE } } }
     );
   } else {
-    await createMessageAndAddReply(message);
+    await createMessageAndAddReply(message, lang);
   }
 }
 
@@ -383,12 +524,15 @@ async function addReply(message) {
 async function answerUser(message) {
   const received = buildMessageKey(message);
   const chatId = message.chat.id;
-  const isGroup = message.chat.type === "group" || message.chat.type === "supergroup";
+  const isGroup = isGroupMessage(message);
+  let group = null;
 
   if (isGroup) {
-    const groupSaved = await ensureGroupSaved(message);
-    if (!groupSaved) return;
+    group = await ensureGroupSaved(message);
+    if (!group) return;
   }
+  const lang = await getLearningLang(message, group);
+  if (!lang) return;
 
   try {
     if (/^[\/.!]/.test(received)) return;
@@ -415,9 +559,10 @@ async function answerUser(message) {
       return;
     }
 
-    const doc = await MessageModel.findOne({ message: received });
-    if (doc && doc.reply.length) {
-      const validReplies = doc.reply
+    const doc = await MessageModel.findOne({ l: lang, m: received });
+    const replies = doc?.r || doc?.reply || [];
+    if (doc && replies.length) {
+      const validReplies = replies
         .map(normalizeReplyItem)
         .filter((r) => r && r.value);
       if (!validReplies.length) {
@@ -626,19 +771,19 @@ async function ensureUserSaved(message, options = {}) {
   const user = message.from;
   if (!user || user.is_bot) return false;
 
-  const langCode = user.language_code || "unknown";
+  const langCode = normalizeLangCode(user.language_code);
   const now = new Date();
   const source = options.source || "direct";
 
   try {
-    const existing = await UserModel.exists({ user_id: user.id });
+    const existing = await UserModel.findOne({ user_id: user.id }).lean().select("lang_manual");
     const setFields = {
       username: user.username,
       firstname: user.first_name || "unknown",
       lastname: user.last_name,
-      lang_code: langCode,
       last_seen_at: now,
     };
+    if (!existing?.lang_manual) setFields.lang_code = langCode;
     if (source !== "direct" && existing) setFields.start_source = source;
 
     const result = await UserModel.findOneAndUpdate(
@@ -678,11 +823,11 @@ async function ensureUserSaved(message, options = {}) {
 }
 
 function inferGroupLangCode(msg) {
-  if (msg.from && msg.from.language_code) return msg.from.language_code;
+  if (msg.from && msg.from.language_code) return normalizeLangCode(msg.from.language_code);
   const members = msg.new_chat_members;
   if (Array.isArray(members) && members.length > 0) {
     const codes = members.map(m => m.language_code).filter(Boolean);
-    if (codes.length > 0) return codes[0];
+    if (codes.length > 0) return normalizeLangCode(codes[0]);
   }
   return "unknown";
 }
@@ -727,7 +872,7 @@ async function ensureGroupSaved(msg) {
       );
     }
 
-    return true;
+    return result;
   } catch (err) {
     console.error(`[ENSURE-GROUP-ERROR] Falha ao salvar grupo ${chatId}:`, err.message);
     return false;
@@ -744,17 +889,9 @@ async function start(message) {
     await ensureUserSaved(message, { source: parseStartSource(message.text) });
     
     const userId = message.from.id;
-    const firstName = message.from.first_name;
-
-    const devText =
-        `Olá, <b>${firstName}</b>! Você é um dos desenvolvedores 🧑‍💻\n\n` +
-        `Você está no painel do Helana. Use os comandos com responsabilidade.`;
-
-    const userText =
-        `Olá, <b>${firstName}</b>!\n\n` +
-        `Eu sou <b>Helana</b>, um bot que responde mensagens, áudios e figurinhas da galera 😄\n\n` +
-        `📣 <b>Novidades do bot:</b> <a href="https://t.me/lbrabo">@lbrabo</a>\n` +
-        `📚 <b>Cursos:</b> <a href="https://t.me/cursobroff">@cursobroff</a>`;
+    const firstName = escapeHtml(message.from.first_name || "user");
+    const devText = t(message, "startDev", firstName);
+    const userText = t(message, "startUser", firstName);
 
     if (is_dev(userId)) {
         await bot.sendMessage(userId, devText, {
@@ -762,12 +899,12 @@ async function start(message) {
             disable_web_page_preview: true,
             reply_markup: {
                 inline_keyboard: [
-                    [{ text: "📦 Github", url: "https://github.com/leviobrabo/helenegbot" }],
+                    [{ text: "Github", url: "https://github.com/leviobrabo/helenegbot" }],
                     [
-                        { text: "📣 Canal", url: "https://t.me/lbrabo" },
-                        { text: "👨‍💻 Suporte", url: "https://t.me/kylorensbot" },
+                        { text: t(message, "channel"), url: "https://t.me/lbrabo" },
+                        { text: t(message, "support"), url: "https://t.me/kylorensbot" },
                     ],
-                    [{ text: "🗃 Comandos do Dev", callback_data: "dev_commands" }],
+                    [{ text: t(message, "devCommands"), callback_data: "dev_commands" }],
                 ],
             },
         }).catch(() => {});
@@ -777,12 +914,12 @@ async function start(message) {
             disable_web_page_preview: true,
             reply_markup: {
                 inline_keyboard: [
-                    [{ text: "✨ Adicione-me em seu grupo", url: "https://t.me/helenagbot?startgroup=true" }],
+                    [{ text: t(message, "addGroup"), url: "https://t.me/helenagbot?startgroup=true" }],
                     [
-                        { text: "📣 Canal Oficial", url: "https://t.me/lbrabo" },
-                        { text: "👨‍💻 Suporte", url: "https://t.me/kylorensbot" },
+                        { text: t(message, "channel"), url: "https://t.me/lbrabo" },
+                        { text: t(message, "support"), url: "https://t.me/kylorensbot" },
                     ],
-                    [{ text: "📦 Github", url: "https://github.com/leviobrabo/helanagbot" }],
+                    [{ text: "Github", url: "https://github.com/leviobrabo/helanagbot" }],
                 ],
             },
         }).catch(() => {});
@@ -892,10 +1029,10 @@ async function groups(message) {
 
 async function banned(message) {
     if (message.chat.type !== "private") {
-        return bot.sendMessage(message.chat.id, "Use este comando no PV com o bot.");
+        return bot.sendMessage(message.chat.id, t(message, "privateOnly"));
     }
     if (!is_dev(message.from.id)) {
-        return bot.sendMessage(message.chat.id, "Você não está autorizado.");
+        return bot.sendMessage(message.chat.id, t(message, "unauthorized"));
     }
     await ensureUserSaved(message);
 
@@ -923,10 +1060,10 @@ async function banned(message) {
 
 async function ban(message) {
     if (message.chat.type !== "private") {
-        return bot.sendMessage(message.chat.id, "Use este comando no PV com o bot.");
+        return bot.sendMessage(message.chat.id, t(message, "privateOnly"));
     }
     if (!is_dev(message.from.id)) {
-        return bot.sendMessage(message.chat.id, "Você não está autorizado.");
+        return bot.sendMessage(message.chat.id, t(message, "unauthorized"));
     }
 
     const rawId = message.text.split(" ")[1];
@@ -955,10 +1092,10 @@ async function ban(message) {
 
 async function unban(message) {
     if (message.chat.type !== "private") {
-        return bot.sendMessage(message.chat.id, "Use este comando no PV com o bot.");
+        return bot.sendMessage(message.chat.id, t(message, "privateOnly"));
     }
     if (!is_dev(message.from.id)) {
-        return bot.sendMessage(message.chat.id, "Você não está autorizado.");
+        return bot.sendMessage(message.chat.id, t(message, "unauthorized"));
     }
 
     const rawId = message.text.split(" ")[1];
@@ -983,32 +1120,76 @@ async function unban(message) {
 
 // ─── /delmsg ──────────────────────────────────────────────────────────────────
 
+async function canChangeGroupLang(message) {
+  if (is_dev(message.from.id)) return true;
+  try {
+    const admins = await bot.getChatAdministrators(message.chat.id);
+    return admins.some((admin) => admin.user?.id === message.from.id);
+  } catch (err) {
+    console.warn("[LANG-ADMIN-WARN]", err.message);
+    return false;
+  }
+}
+
+async function lang(message) {
+  const rawLang = message.text.split(/\s+/)[1];
+  const requestedLang = rawLang ? normalizeLangCode(rawLang) : null;
+
+  if (message.chat.type === "private") {
+    await ensureUserSaved(message);
+    if (!requestedLang) {
+      return bot.sendMessage(message.chat.id, t(message, "currentLang", normalizeLangCode(message.from.language_code)), { parse_mode: "HTML" });
+    }
+    await updateUserLanguage(message.from.id, requestedLang);
+    return bot.sendMessage(message.chat.id, t(message, "langSet", requestedLang), { parse_mode: "HTML" });
+  }
+
+  if (!isGroupMessage(message)) return;
+  const group = await ensureGroupSaved(message);
+  if (!group) return;
+
+  if (!requestedLang) {
+    return bot.sendMessage(message.chat.id, t(message, "currentGroupLang", normalizeLangCode(group.lang_code)), { parse_mode: "HTML" });
+  }
+
+  if (!await canChangeGroupLang(message)) {
+    return bot.sendMessage(message.chat.id, t(message, "groupLangAdminOnly"));
+  }
+
+  await updateGroupLanguage(message.chat.id, requestedLang);
+  return bot.sendMessage(message.chat.id, t(message, "groupLangSet", requestedLang), { parse_mode: "HTML" });
+}
+
 async function removeMessage(message) {
   if (!is_dev(message.from.id)) return;
+  const group = isGroupMessage(message) ? await ensureGroupSaved(message) : null;
+  if (isGroupMessage(message) && !group) return;
+  const lang = await getLearningLang(message, group);
 
   const repliedMessage = message.reply_to_message
     ? buildMessageKey(message.reply_to_message)
     : null;
 
   if (!repliedMessage) {
-    return bot.sendMessage(message.chat.id, "Responda a uma mensagem para deletar do banco.");
+    return bot.sendMessage(message.chat.id, t(message, "replyToDelete"));
   }
 
-  const exists = await MessageModel.exists({ message: repliedMessage });
+  const exists = await MessageModel.exists({ l: lang, m: repliedMessage });
   if (!exists) {
-    return bot.sendMessage(message.chat.id, "❌ Mensagem não encontrada no banco de dados.");
+    return bot.sendMessage(message.chat.id, t(message, "messageNotFound"));
   }
 
   await MessageModel.deleteMany({
+    l: lang,
     $or: [
-      { message: repliedMessage },
-      { "reply.value": repliedMessage },
+      { m: repliedMessage },
+      { "r.v": repliedMessage },
     ],
   });
 
   bot.sendMessage(
     message.chat.id,
-    `✅ Deletado por <a href="tg://user?id=${message.from.id}">${message.from.first_name}</a>.\n\nTodas as respostas associadas foram apagadas.`,
+    t(message, "deleted", escapeHtml(message.from.first_name || "user"), message.from.id),
     { parse_mode: "HTML", reply_to_message_id: message.message_id }
   );
 }
@@ -1017,10 +1198,10 @@ async function removeMessage(message) {
 
 async function devs(message) {
     if (!is_dev(message.from.id)) {
-        return bot.sendMessage(message.chat.id, "Este comando é apenas para desenvolvedores!");
+        return bot.sendMessage(message.chat.id, t(message, "devOnly"));
     }
     if (message.chat.type !== "private") {
-        return bot.sendMessage(message.chat.id, "Use este comando no PV com o bot.");
+        return bot.sendMessage(message.chat.id, t(message, "privateOnly"));
     }
     await ensureUserSaved(message);
 
@@ -1037,10 +1218,10 @@ async function devs(message) {
 
 async function dbstats(message) {
     if (!is_dev(message.from.id)) {
-        return bot.sendMessage(message.chat.id, "Este comando é apenas para desenvolvedores!");
+        return bot.sendMessage(message.chat.id, t(message, "devOnly"));
     }
     if (message.chat.type !== "private") {
-        return bot.sendMessage(message.chat.id, "Use este comando no PV com o bot.");
+        return bot.sendMessage(message.chat.id, t(message, "privateOnly"));
     }
     await ensureUserSaved(message);
 
@@ -1071,10 +1252,10 @@ async function dbstats(message) {
 
 async function syncdb(message) {
     if (!is_dev(message.from.id)) {
-        return bot.sendMessage(message.chat.id, "Este comando é apenas para desenvolvedores!");
+        return bot.sendMessage(message.chat.id, t(message, "devOnly"));
     }
     if (message.chat.type !== "private") {
-        return bot.sendMessage(message.chat.id, "Use este comando no PV com o bot.");
+        return bot.sendMessage(message.chat.id, t(message, "privateOnly"));
     }
     await ensureUserSaved(message);
 
@@ -1725,10 +1906,9 @@ function registerCallbackHandler() {
         }
 
         if (data === "back_to_start") {
-            const firstName = q.from.first_name;
-            const devText =
-                `Olá, <b>${firstName}</b>! Você é um dos desenvolvedores 🧑‍💻\n\n` +
-                `Você está no painel do Helana. Use os comandos com responsabilidade.`;
+            const callbackMessage = { from: q.from };
+            const firstName = escapeHtml(q.from.first_name || "user");
+            const devText = t(callbackMessage, "startDev", firstName);
             await bot
                 .editMessageText(devText, {
                     parse_mode: "HTML",
@@ -1737,12 +1917,12 @@ function registerCallbackHandler() {
                     message_id: q.message.message_id,
                     reply_markup: {
                         inline_keyboard: [
-                            [{ text: "📦 Github", url: "https://github.com/leviobrabo/helenagbot" }],
+                            [{ text: "Github", url: "https://github.com/leviobrabo/helenagbot" }],
                             [
-                                { text: "📣 Canal", url: "https://t.me/lbrabo" },
-                                { text: "👨‍💻 Suporte", url: "https://t.me/kylorensbot" },
+                                { text: t(callbackMessage, "channel"), url: "https://t.me/lbrabo" },
+                                { text: t(callbackMessage, "support"), url: "https://t.me/kylorensbot" },
                             ],
-                            [{ text: "🗃 Comandos do Dev", callback_data: "dev_commands" }],
+                            [{ text: t(callbackMessage, "devCommands"), callback_data: "dev_commands" }],
                         ],
                     },
                 })
@@ -1773,14 +1953,14 @@ function registerCallbackHandler() {
 async function updateUserLanguage(userId, langCode) {
     await UserModel.findOneAndUpdate(
         { user_id: userId },
-        { $set: { lang_code: langCode } }
+        { $set: { lang_code: normalizeLangCode(langCode), lang_manual: true } }
     ).catch(() => {});
 }
 
 async function updateGroupLanguage(chatId, langCode) {
     await ChatModel.findOneAndUpdate(
         { chatId },
-        { $set: { lang_code: langCode } }
+        { $set: { lang_code: normalizeLangCode(langCode), lang_manual: true } }
     ).catch(() => {});
 }
 
@@ -1890,7 +2070,7 @@ async function migrateReplyFormat() {
 async function adddev(message) {
   if (!is_dev(message.from.id)) return;
   if (message.chat.type !== "private") {
-    return bot.sendMessage(message.chat.id, "Use este comando no PV com o bot.");
+    return bot.sendMessage(message.chat.id, t(message, "privateOnly"));
   }
 
   const rawId = message.text.split(" ")[1];
@@ -1917,7 +2097,7 @@ async function adddev(message) {
 async function rmdev(message) {
   if (!is_dev(message.from.id)) return;
   if (message.chat.type !== "private") {
-    return bot.sendMessage(message.chat.id, "Use este comando no PV com o bot.");
+    return bot.sendMessage(message.chat.id, t(message, "privateOnly"));
   }
 
   const rawId = message.text.split(" ")[1];
@@ -2096,6 +2276,7 @@ exports.initHandler = () => {
   bot.onText(/^\/unban/, unban);
   bot.onText(/^\/banned/, banned);
   bot.onText(/^\/delmsg/, removeMessage);
+  bot.onText(/^\/lang(?:@\w+)?(?:\s|$)/, lang);
   bot.onText(/^\/devs/, devs);
   bot.onText(/^\/dbstats/, dbstats);
   bot.onText(/^\/syncdb/, syncdb);

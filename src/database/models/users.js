@@ -6,6 +6,7 @@ const userSchema = new Schema({
   firstname: { type: String, required: true },
   lastname: { type: String },
   lang_code: { type: String, default: "unknown", index: true },
+  lang_manual: { type: Boolean, default: false, index: true },
   is_dev: { type: Boolean, default: false, index: true },
   last_ad_sent: { type: Date, default: null, index: true },
   created_at: { type: Date, default: Date.now, index: true },
