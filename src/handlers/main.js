@@ -8,9 +8,10 @@ const { adsterra } = require("../config/ads");
 const {
   queueLow,
   setGlobal429,
-  isGlobal429Paused,
+  waitForGlobal429,
   setCampaignRunning,
   clearCampaignRunning,
+  touchCampaignRunning,
   isCampaignRunning,
   getCampaignName,
 } = require("../queue");
@@ -26,6 +27,7 @@ const growthLogThreadId = parseInt(process.env.GROWTH_LOG_THREAD_ID || "112375",
 const REPLY_MAX_SIZE = 50;
 const PIX_DONATION_KEY = process.env.PIX_DONATION_KEY || "32dc79d2-2868-4ef0-a277-2c10725341d4";
 const DONATION_MONTHLY_LIMIT = 800;
+const PAID_BROADCAST_ENABLED = process.env.TELEGRAM_PAID_BROADCAST === "true";
 
 let crashCount = 0;
 let lastCrashTime = 0;
@@ -341,22 +343,26 @@ function chunkArray(arr, size) {
 // ─── retry mechanism ─────────────────────────────────────────────────────────
 
 async function retryWithBackoff(fn, maxRetries = 3, delayMs = 1000) {
+  let lastError = null;
   for (let i = 0; i < maxRetries; i++) {
     try {
-      while (isGlobal429Paused()) await delay(200);
+      await waitForGlobal429();
       return await fn();
     } catch (error) {
+      lastError = error;
       const errorCode = error?.response?.body?.error_code;
       if (errorCode === 429) {
         const retryAfter = error?.response?.body?.parameters?.retry_after || 5;
         setGlobal429(retryAfter);
-        await delay(retryAfter * 1000);
+        await waitForGlobal429();
+        if (i === maxRetries - 1) throw error;
         continue;
       }
       if (i === maxRetries - 1) throw error;
       await delay(delayMs * Math.pow(2, i));
     }
   }
+  throw lastError || new Error("retryWithBackoff exhausted");
 }
 
 function safeSendMessage(chatId, text, options = {}) {
@@ -380,18 +386,55 @@ function safeSendPhoto(chatId, photoUrl, options = {}) {
   });
 }
 
-function safeCopyMessage(chatId, fromChatId, messageId) {
+function safeCopyMessage(chatId, fromChatId, messageId, options = {}) {
   return retryWithBackoff(async () => {
-    return await bot.copyMessage(chatId, fromChatId, messageId);
+    return await bot.copyMessage(chatId, fromChatId, messageId, options);
   });
 }
 
+function campaignSendOptions(options = {}) {
+  return PAID_BROADCAST_ENABLED
+    ? { ...options, allow_paid_broadcast: true }
+    : options;
+}
+
+function telegramErrorDescription(err) {
+  return err?.response?.body?.description || err?.message || "";
+}
+
+function isUnreachableUserError(err) {
+  const code = err?.response?.body?.error_code;
+  const desc = telegramErrorDescription(err);
+  if (code === 403) return true;
+  return code === 400 && /chat not found|bot can't initiate|user is deactivated|user not found|blocked by user/i.test(desc);
+}
+
+function isInactiveGroupError(err) {
+  const code = err?.response?.body?.error_code;
+  const desc = telegramErrorDescription(err);
+  return code === 403 || (code === 400 && /chat not found|group is deactivated|not enough rights|bot was kicked/i.test(desc));
+}
+
+async function removeUnreachableUser(userId, err) {
+  if (!isUnreachableUserError(err)) return false;
+  await UserModel.deleteOne({ user_id: userId }).catch(() => {});
+  console.log(`[USERS] Removido ${userId} - ${telegramErrorDescription(err) || "inalcancavel"}`);
+  return true;
+}
+
+async function removeInactiveGroup(chatId, err) {
+  if (!isInactiveGroupError(err)) return false;
+  await ChatModel.deleteOne({ chatId }).catch(() => {});
+  console.log(`[GROUPS] Removido ${chatId} - ${telegramErrorDescription(err) || "inativo"}`);
+  return true;
+}
+
 function queuedSendMessage(chatId, text, options = {}) {
-  return queueLow(() => safeSendMessage(chatId, text, options), 1);
+  return queueLow(() => safeSendMessage(chatId, text, campaignSendOptions(options)), 1);
 }
 
 function queuedCopyMessage(chatId, fromChatId, messageId) {
-  return queueLow(() => safeCopyMessage(chatId, fromChatId, messageId), 1);
+  return queueLow(() => safeCopyMessage(chatId, fromChatId, messageId, campaignSendOptions()), 1);
 }
 
 let BOT_ID = null;
@@ -1322,18 +1365,13 @@ async function bc(msg) {
         await queuedSendMessage(user_id, text, { disable_web_page_preview: !webPreview });
         success++;
       } catch (err) {
-        const code = err?.response?.body?.error_code;
-        const desc = err?.response?.body?.description || "";
-        if (code === 403) {
+        if (await removeUnreachableUser(user_id, err)) {
           blocked++;
-          await UserModel.deleteOne({ user_id }).catch(() => {});
-        } else if (code === 400 && /chat not found|bot can't initiate/i.test(desc)) {
-          blocked++;
-          await UserModel.deleteOne({ user_id }).catch(() => {});
         } else {
           failed++;
         }
       }
+      touchCampaignRunning();
 
       if (i % 100 === 0 && i > 0) {
         await delay(5000);
@@ -1407,18 +1445,13 @@ async function broadcast(msg) {
         await queuedCopyMessage(user_id, msg.chat.id, reply.message_id);
         success++;
       } catch (err) {
-        const code = err?.response?.body?.error_code;
-        const desc = err?.response?.body?.description || "";
-        if (code === 403) {
+        if (await removeUnreachableUser(user_id, err)) {
           blocked++;
-          await UserModel.deleteOne({ user_id }).catch(() => {});
-        } else if (code === 400 && /chat not found|bot can't initiate/i.test(desc)) {
-          blocked++;
-          await UserModel.deleteOne({ user_id }).catch(() => {});
         } else {
           failed++;
         }
       }
+      touchCampaignRunning();
 
       if (i % 100 === 0 && i > 0) {
         await delay(5000);
@@ -1488,15 +1521,13 @@ async function sendgp(msg) {
           await queuedCopyMessage(chatId, replyMsg.chat.id, replyMsg.message_id);
           success++;
         } catch (err) {
-          const code = err?.response?.body?.error_code;
-          const desc = err?.response?.body?.description || "";
-          if (code === 403 || (code === 400 && /chat not found|group is deactivated|not enough rights/i.test(desc))) {
+          if (await removeInactiveGroup(chatId, err)) {
             removed++;
-            await ChatModel.deleteOne({ chatId }).catch(() => {});
           } else {
             failed++;
           }
         }
+        touchCampaignRunning();
 
         if (i % 50 === 0 && i > 0) {
           await delay(10000);
@@ -1536,15 +1567,13 @@ async function sendgp(msg) {
           await queuedSendMessage(chatId, text, { disable_web_page_preview: !webPreview });
           success++;
         } catch (err) {
-          const code = err?.response?.body?.error_code;
-          const desc = err?.response?.body?.description || "";
-          if (code === 403 || (code === 400 && /chat not found|group is deactivated|not enough rights/i.test(desc))) {
+          if (await removeInactiveGroup(chatId, err)) {
             removed++;
-            await ChatModel.deleteOne({ chatId }).catch(() => {});
           } else {
             failed++;
           }
         }
+        touchCampaignRunning();
 
         if (i % 50 === 0 && i > 0) {
           await delay(10000);
@@ -1590,44 +1619,32 @@ const AD_MIN_DELAY = 1050;
 const AD_MAX_DELAY = 4000;
 
 async function sendAdWithRateLimit(chatId, text, replyMarkup, isGroup) {
-  while (isGlobal429Paused()) await delay(200);
+  await waitForGlobal429();
 
   try {
     await queueLow(() => safeSendMessage(chatId, text, {
       disable_web_page_preview: true,
       reply_markup: replyMarkup,
+      ...(PAID_BROADCAST_ENABLED && { allow_paid_broadcast: true }),
     }), 1);
     adDelay = Math.max(AD_MIN_DELAY, adDelay * 0.95);
     return true;
   } catch (err) {
     const code = err?.response?.body?.error_code;
-    const desc = err?.response?.body?.description || "";
 
     if (code === 429) {
       const retryAfter = err?.response?.body?.parameters?.retry_after || 10;
       console.warn(`[ADS] 429 rate limit — aguardando ${retryAfter}s`);
       setGlobal429(retryAfter);
       adDelay = Math.min(AD_MAX_DELAY, adDelay * 2);
-      await delay(retryAfter * 1000);
-      try {
-        await queueLow(() => safeSendMessage(chatId, text, {
-          disable_web_page_preview: true,
-          reply_markup: replyMarkup,
-        }), 1);
-        return true;
-      } catch (retryErr) {
-        return false;
-      }
+      await waitForGlobal429();
+      return false;
     }
 
     if (isGroup) {
-      if (code === 403 || (code === 400 && /chat not found|group is deactivated|not enough rights/i.test(desc))) {
-        await ChatModel.deleteOne({ chatId }).catch(() => {});
-      }
+      await removeInactiveGroup(chatId, err);
     } else {
-      if (code === 403 || (code === 400 && /chat not found|bot can't initiate/i.test(desc))) {
-        await UserModel.deleteOne({ user_id: chatId }).catch(() => {});
-      }
+      await removeUnreachableUser(chatId, err);
     }
     return false;
   }
@@ -1672,6 +1689,7 @@ async function sendAdsToUsers() {
       } else {
         failed++;
       }
+      touchCampaignRunning();
 
       await delay(adDelay);
 
@@ -1748,6 +1766,7 @@ async function sendMonthlyDonationRequests() {
       } else {
         failed++;
       }
+      touchCampaignRunning();
 
       await delay(adDelay);
 
@@ -1804,6 +1823,7 @@ async function sendAdsToGroups() {
       } else {
         failed++;
       }
+      touchCampaignRunning();
 
       await delay(groupAdDelay);
 

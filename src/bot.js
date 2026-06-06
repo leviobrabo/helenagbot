@@ -1,5 +1,5 @@
 const TelegramBot = require("node-telegram-bot-api");
-const { queueHigh, setGlobal429, isGlobal429Paused, waitForChatThrottle } = require("./queue");
+const { queueHigh, setGlobal429, waitForGlobal429, waitForChatThrottle } = require("./queue");
 
 const bot = new TelegramBot(process.env.TELEGRAM_API, {
   polling: {
@@ -46,9 +46,7 @@ function wrapApiMethod(methodName) {
 
   bot[methodName] = (...args) => {
     return queueHigh(async () => {
-      while (isGlobal429Paused()) {
-        await new Promise((r) => setTimeout(r, 200));
-      }
+      await waitForGlobal429();
 
       const chatId = getChatIdFromArgs(methodName, args);
       if (chatId !== null) {
@@ -62,7 +60,7 @@ function wrapApiMethod(methodName) {
         if (code === 429) {
           const retryAfter = err?.response?.body?.parameters?.retry_after || 5;
           setGlobal429(retryAfter);
-          await new Promise((r) => setTimeout(r, retryAfter * 1000));
+          await waitForGlobal429();
           return await original(...args);
         }
         throw err;

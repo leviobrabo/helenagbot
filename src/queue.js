@@ -7,6 +7,8 @@ class SimpleQueue {
     this._queue = [];
     this._intervalCount = 0;
     this._intervalTimer = null;
+    this._paused = false;
+
     if (this._interval > 0) {
       this._intervalTimer = setInterval(() => {
         this._intervalCount = 0;
@@ -61,20 +63,20 @@ class SimpleQueue {
 }
 
 const highQueue = new SimpleQueue({
-  concurrency: 5,
+  concurrency: 3,
   interval: 1000,
-  intervalCap: 10,
+  intervalCap: 25,
 });
 
 const lowQueue = new SimpleQueue({
   concurrency: 1,
   interval: 1000,
-  intervalCap: 15,
+  intervalCap: 25,
 });
 
 const chatTimestamps = new Map();
 const CHAT_THROTTLE_TTL = 60_000;
-const GROUP_MIN_INTERVAL = 3000;
+const GROUP_MIN_INTERVAL = 3200;
 const PRIVATE_MIN_INTERVAL = 1050;
 
 setInterval(() => {
@@ -99,48 +101,92 @@ async function waitForChatThrottle(chatId, isGroup) {
 }
 
 let global429Until = 0;
+let global429Timer = null;
+let global429Waiters = [];
+
+function releaseGlobal429Waiters() {
+  const waiters = global429Waiters;
+  global429Waiters = [];
+  waiters.forEach((resolve) => resolve());
+}
+
+function scheduleGlobal429Release(ms) {
+  if (global429Timer) clearTimeout(global429Timer);
+  global429Timer = setTimeout(() => {
+    global429Timer = null;
+    const remaining = global429Until - Date.now();
+    if (remaining > 0) {
+      scheduleGlobal429Release(remaining);
+      return;
+    }
+    highQueue.start();
+    lowQueue.start();
+    releaseGlobal429Waiters();
+    console.log("[QUEUE] envios retomados apos 429");
+  }, ms);
+  if (global429Timer.unref) global429Timer.unref();
+}
 
 function setGlobal429(retryAfterSeconds) {
-  const ms = (retryAfterSeconds + 1) * 1000;
-  global429Until = Date.now() + ms;
-  console.warn(`[QUEUE] 429 global — pausando low queue por ${retryAfterSeconds + 1}s`);
+  const retry = Math.max(1, Number(retryAfterSeconds) || 5);
+  const ms = (retry + 1) * 1000;
+  const until = Date.now() + ms;
+  const extended = until > global429Until + 500;
+  global429Until = Math.max(global429Until, until);
 
+  if (!extended) return;
+
+  console.warn(`[QUEUE] 429 global - pausando envios por ${retry + 1}s`);
+  highQueue.pause();
   lowQueue.pause();
-  setTimeout(() => {
-    lowQueue.start();
-    console.log("[QUEUE] low queue retomada após 429");
-  }, ms).unref();
+  scheduleGlobal429Release(ms);
 }
 
 function isGlobal429Paused() {
   return Date.now() < global429Until;
 }
 
+function waitForGlobal429() {
+  if (!isGlobal429Paused()) return Promise.resolve();
+  return new Promise((resolve) => {
+    global429Waiters.push(resolve);
+  });
+}
+
 let campaignRunning = false;
 let campaignName = "";
 let campaignStartedAt = 0;
-const CAMPAIGN_LOCK_MAX_MS = 2 * 60 * 60 * 1000;
+let campaignHeartbeatAt = 0;
+const CAMPAIGN_LOCK_MAX_MS = 24 * 60 * 60 * 1000;
 
 function setCampaignRunning(name) {
-  if (campaignRunning && Date.now() - campaignStartedAt > CAMPAIGN_LOCK_MAX_MS) {
+  if (campaignRunning && Date.now() - campaignHeartbeatAt > CAMPAIGN_LOCK_MAX_MS) {
     console.warn(`[CAMPAIGN] "${campaignName}" expirou por timeout - liberando lock antigo`);
     campaignRunning = false;
     campaignName = "";
     campaignStartedAt = 0;
+    campaignHeartbeatAt = 0;
   }
   if (campaignRunning) return false;
+
   campaignRunning = true;
   campaignName = name;
   campaignStartedAt = Date.now();
-  console.log(`[CAMPAIGN] "${name}" iniciada — bloqueando outras campanhas`);
+  campaignHeartbeatAt = campaignStartedAt;
+  console.log(`[CAMPAIGN] "${name}" iniciada - bloqueando outras campanhas`);
   return true;
 }
 
+function touchCampaignRunning() {
+  if (campaignRunning) campaignHeartbeatAt = Date.now();
+}
+
 function clearCampaignRunning() {
-  console.log(`[CAMPAIGN] "${campaignName}" concluída — campanhas desbloqueadas`);
+  console.log(`[CAMPAIGN] "${campaignName}" concluida - campanhas desbloqueadas`);
   campaignRunning = false;
   campaignName = "";
   campaignStartedAt = 0;
+  campaignHeartbeatAt = 0;
 }
 
 function isCampaignRunning() {
@@ -166,8 +212,10 @@ module.exports = {
   queueLow,
   setGlobal429,
   isGlobal429Paused,
+  waitForGlobal429,
   setCampaignRunning,
   clearCampaignRunning,
+  touchCampaignRunning,
   isCampaignRunning,
   getCampaignName,
   waitForChatThrottle,
