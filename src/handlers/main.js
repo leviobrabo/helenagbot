@@ -438,6 +438,13 @@ function queuedCopyMessage(chatId, fromChatId, messageId) {
   return queueLow(() => safeCopyMessage(chatId, fromChatId, messageId, campaignSendOptions()), 1);
 }
 
+const BROADCAST_USER_FILTER = {
+  $or: [
+    { can_broadcast: true },
+    { message_count: { $gt: 0 } },
+  ],
+};
+
 const CAMPAIGN_USER_BATCH_SIZE = Number(process.env.CAMPAIGN_USER_BATCH_SIZE || 30);
 const CAMPAIGN_USER_BATCH_PAUSE_MS = Number(process.env.CAMPAIGN_USER_BATCH_PAUSE_MS || 1100);
 const CAMPAIGN_GROUP_DELAY_MS = Number(process.env.CAMPAIGN_GROUP_DELAY_MS || 3300);
@@ -1861,7 +1868,7 @@ async function bcCampaign(msg) {
     return bot.sendMessage(msg.chat.id, "<i>Uso: /bc [-d] &lt;texto&gt;</i>", { parse_mode: "HTML" });
   }
 
-  const users = await UserModel.find({ can_broadcast: true }).lean().select("user_id");
+  const users = await UserModel.find(BROADCAST_USER_FILTER).lean().select("user_id");
   return runCampaign({
     msg,
     name: "BC",
@@ -1888,7 +1895,7 @@ async function broadcastCampaign(msg) {
   }
 
   const reply = msg.reply_to_message;
-  const users = await UserModel.find({ can_broadcast: true }).lean().select("user_id");
+  const users = await UserModel.find(BROADCAST_USER_FILTER).lean().select("user_id");
   return runCampaign({
     msg,
     name: "BROADCAST",
@@ -2423,7 +2430,7 @@ async function productStats(message) {
     funnelReply,
   ] = await Promise.all([
     UserModel.countDocuments(),
-    UserModel.countDocuments({ can_broadcast: true }),
+    UserModel.countDocuments(BROADCAST_USER_FILTER),
     ChatModel.countDocuments({ is_ban: false }),
     MessageModel.countDocuments(),
     UserModel.aggregate([{ $group: { _id: "$lang_code", count: { $sum: 1 } } }, { $sort: { count: -1 } }]),
@@ -2432,13 +2439,31 @@ async function productStats(message) {
     UserModel.countDocuments({ activity_days: today }),
     UserModel.countDocuments({ last_seen_at: { $gte: wauCutoff } }),
     UserModel.countDocuments({ last_seen_at: { $gte: mauCutoff } }),
-    UserModel.countDocuments({ can_broadcast: true, activity_days: today }),
-    UserModel.countDocuments({ can_broadcast: true, private_seen_at: { $gte: wauCutoff } }),
-    UserModel.countDocuments({ can_broadcast: true, private_seen_at: { $gte: mauCutoff } }),
+    UserModel.countDocuments({ $and: [BROADCAST_USER_FILTER, { activity_days: today }] }),
+    UserModel.countDocuments({
+      $and: [
+        BROADCAST_USER_FILTER,
+        { $or: [{ private_seen_at: { $gte: wauCutoff } }, { private_seen_at: null, last_seen_at: { $gte: wauCutoff } }] },
+      ],
+    }),
+    UserModel.countDocuments({
+      $and: [
+        BROADCAST_USER_FILTER,
+        { $or: [{ private_seen_at: { $gte: mauCutoff } }, { private_seen_at: null, last_seen_at: { $gte: mauCutoff } }] },
+      ],
+    }),
     UserModel.countDocuments({ $or: [{ last_seen_at: { $lt: mauCutoff } }, { last_seen_at: null }, { last_seen_at: { $exists: false } }] }),
     UserModel.countDocuments({
-      can_broadcast: true,
-      $or: [{ private_seen_at: { $lt: mauCutoff } }, { private_seen_at: null }, { private_seen_at: { $exists: false } }],
+      $and: [
+        BROADCAST_USER_FILTER,
+        {
+          $or: [
+            { private_seen_at: { $lt: mauCutoff } },
+            { private_seen_at: null, last_seen_at: { $lt: mauCutoff } },
+            { private_seen_at: { $exists: false }, last_seen_at: { $lt: mauCutoff } },
+          ],
+        },
+      ],
     }),
     UserModel.countDocuments({ is_paying: true }),
     UserModel.countDocuments({ subscription_canceled_at: { $ne: null } }),
