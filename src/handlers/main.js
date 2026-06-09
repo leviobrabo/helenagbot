@@ -424,6 +424,7 @@ async function removeUnreachableUser(userId, err) {
 
 async function removeInactiveGroup(chatId, err) {
   if (!isInactiveGroupError(err)) return false;
+  await bot.leaveChat(chatId).catch(() => {});
   await ChatModel.deleteOne({ chatId }).catch(() => {});
   console.log(`[GROUPS] Removido ${chatId} - ${telegramErrorDescription(err) || "inativo"}`);
   return true;
@@ -435,6 +436,139 @@ function queuedSendMessage(chatId, text, options = {}) {
 
 function queuedCopyMessage(chatId, fromChatId, messageId) {
   return queueLow(() => safeCopyMessage(chatId, fromChatId, messageId, campaignSendOptions()), 1);
+}
+
+const CAMPAIGN_USER_BATCH_SIZE = Number(process.env.CAMPAIGN_USER_BATCH_SIZE || 30);
+const CAMPAIGN_USER_BATCH_PAUSE_MS = Number(process.env.CAMPAIGN_USER_BATCH_PAUSE_MS || 1100);
+const CAMPAIGN_GROUP_DELAY_MS = Number(process.env.CAMPAIGN_GROUP_DELAY_MS || 3300);
+const CAMPAIGN_PROGRESS_MIN_MS = Number(process.env.CAMPAIGN_PROGRESS_MIN_MS || 30000);
+
+function formatEta(processed, total, startedAt) {
+  if (!processed || !total) return "calculando";
+  const elapsed = Date.now() - startedAt;
+  const remaining = Math.max(0, total - processed);
+  return timeFormatter(Math.round((elapsed / processed) * remaining / 1000));
+}
+
+function defaultProgressText(title, stats) {
+  const pct = stats.total ? Math.round((stats.processed / stats.total) * 100) : 100;
+  return (
+    `<b>${title}</b>\n\n` +
+    `Progresso: <code>${pct}%</code> (${stats.processed}/${stats.total})\n` +
+    `OK: <code>${stats.success}</code>\n` +
+    `Removidos: <code>${stats.removed}</code>\n` +
+    `Falhas: <code>${stats.failed}</code>\n` +
+    `Velocidade: <code>${stats.rate.toFixed(2)}/s</code>\n` +
+    `ETA: <code>${stats.eta}</code>`
+  );
+}
+
+function defaultDoneText(title, stats) {
+  return (
+    `<b>${title}</b>\n\n` +
+    `Total: <code>${stats.total}</code>\n` +
+    `OK: <code>${stats.success}</code>\n` +
+    `Removidos: <code>${stats.removed}</code>\n` +
+    `Falhas: <code>${stats.failed}</code>`
+  );
+}
+
+async function editCampaignStatus(sentMsg, text) {
+  return bot.editMessageText(text, {
+    chat_id: sentMsg.chat.id,
+    message_id: sentMsg.message_id,
+    parse_mode: "HTML",
+  }).catch(() => {});
+}
+
+async function runCampaign({
+  msg,
+  name,
+  kind,
+  startText,
+  targets,
+  sendTarget,
+  cleanupTarget,
+  markSuccess,
+  progressTitle,
+  doneTitle,
+  logPrefix,
+}) {
+  if (isCampaignRunning()) {
+    return bot.sendMessage(msg.chat.id, `Campanha "${getCampaignName()}" em andamento. Aguarde terminar.`, { parse_mode: "HTML" });
+  }
+
+  if (!setCampaignRunning(name)) {
+    return bot.sendMessage(msg.chat.id, "Outra campanha em andamento. Aguarde.", { parse_mode: "HTML" });
+  }
+
+  const sentMsg = await bot.sendMessage(msg.chat.id, startText, { parse_mode: "HTML" });
+  const total = targets.length;
+  const startedAt = Date.now();
+  let lastProgressAt = 0;
+  const stats = { total, processed: 0, success: 0, removed: 0, failed: 0, rate: 0, eta: "calculando" };
+
+  console.log(`[${logPrefix}] Iniciando campanha para ${total} destino(s)`);
+
+  try {
+    if (!total) {
+      await editCampaignStatus(sentMsg, defaultDoneText(doneTitle, stats));
+      return stats;
+    }
+
+    async function processTarget(target) {
+      try {
+        await sendTarget(target);
+        stats.success++;
+        if (markSuccess) await markSuccess(target).catch(() => {});
+      } catch (err) {
+        if (await cleanupTarget(target, err)) {
+          stats.removed++;
+        } else {
+          stats.failed++;
+          console.warn(`[${logPrefix}] Falha em ${target.user_id || target.chatId}: ${telegramErrorDescription(err)}`);
+        }
+      }
+
+      stats.processed++;
+      stats.rate = stats.processed / Math.max(1, (Date.now() - startedAt) / 1000);
+      stats.eta = formatEta(stats.processed, stats.total, startedAt);
+      touchCampaignRunning();
+    }
+
+    async function maybeUpdateProgress() {
+      const now = Date.now();
+      if (stats.processed === stats.total || now - lastProgressAt >= CAMPAIGN_PROGRESS_MIN_MS) {
+        lastProgressAt = now;
+        await editCampaignStatus(sentMsg, defaultProgressText(progressTitle, stats));
+      }
+    }
+
+    if (kind === "user") {
+      for (let i = 0; i < targets.length; i += CAMPAIGN_USER_BATCH_SIZE) {
+        const batch = targets.slice(i, i + CAMPAIGN_USER_BATCH_SIZE);
+        await Promise.all(batch.map(processTarget));
+        await maybeUpdateProgress();
+        if (stats.processed < stats.total) {
+          await delay(CAMPAIGN_USER_BATCH_PAUSE_MS);
+        }
+      }
+    } else {
+      for (const target of targets) {
+        await processTarget(target);
+        await maybeUpdateProgress();
+        if (stats.processed < stats.total) {
+          await delay(CAMPAIGN_GROUP_DELAY_MS);
+        }
+      }
+    }
+
+    console.log(`[${logPrefix}] Concluido: OK ${stats.success}/${total} | removidos ${stats.removed} | falhas ${stats.failed}`);
+    await editCampaignStatus(sentMsg, defaultDoneText(doneTitle, stats));
+    return stats;
+  } finally {
+    clearCampaignRunning();
+  }
 }
 
 let BOT_ID = null;
@@ -1705,6 +1839,108 @@ async function sendAdsToUsers() {
   }
 }
 
+async function bcCampaign(msg) {
+  if (!is_dev(msg.from.id)) return;
+  if (msg.chat.type !== "private") return;
+  await ensureUserSaved(msg);
+
+  const query = msg.text.replace(/^\/bc(?:@\w+)?\s*/, "").trim();
+  if (!query) {
+    return bot.sendMessage(msg.chat.id, "<i>Uso: /bc [-d] &lt;texto&gt;</i>", { parse_mode: "HTML" });
+  }
+
+  const webPreview = query.startsWith("-d");
+  const text = webPreview ? query.substring(2).trim() : query;
+  if (!text) {
+    return bot.sendMessage(msg.chat.id, "<i>Uso: /bc [-d] &lt;texto&gt;</i>", { parse_mode: "HTML" });
+  }
+
+  const users = await UserModel.find().lean().select("user_id");
+  return runCampaign({
+    msg,
+    name: "BC",
+    kind: "user",
+    startText: "<i>Enviando broadcast para usuarios em blocos...</i>",
+    targets: users,
+    sendTarget: (user) => queuedSendMessage(user.user_id, text, { disable_web_page_preview: !webPreview }),
+    cleanupTarget: (user, err) => removeUnreachableUser(user.user_id, err),
+    progressTitle: "Broadcast em progresso",
+    doneTitle: "Broadcast concluido",
+    logPrefix: "BC",
+  });
+}
+
+async function broadcastCampaign(msg) {
+  if (!is_dev(msg.from.id)) return;
+  if (msg.chat.type !== "private") return;
+  await ensureUserSaved(msg);
+
+  if (!msg.reply_to_message) {
+    return bot.sendMessage(msg.chat.id, "<i>Responda a uma mensagem para fazer broadcast.</i>", {
+      parse_mode: "HTML",
+    });
+  }
+
+  const reply = msg.reply_to_message;
+  const users = await UserModel.find().lean().select("user_id");
+  return runCampaign({
+    msg,
+    name: "BROADCAST",
+    kind: "user",
+    startText: "<i>Broadcast iniciando em blocos...</i>",
+    targets: users,
+    sendTarget: (user) => queuedCopyMessage(user.user_id, msg.chat.id, reply.message_id),
+    cleanupTarget: (user, err) => removeUnreachableUser(user.user_id, err),
+    progressTitle: "Broadcast em progresso",
+    doneTitle: "Broadcast concluido",
+    logPrefix: "BROADCAST",
+  });
+}
+
+async function sendgpCampaign(msg) {
+  if (!is_dev(msg.from.id)) return;
+  if (msg.chat.type !== "private") return;
+  await ensureUserSaved(msg);
+
+  const groups = await ChatModel.find({ is_ban: false }).lean().select("chatId");
+
+  if (msg.reply_to_message) {
+    const replyMsg = msg.reply_to_message;
+    return runCampaign({
+      msg,
+      name: "SENDGP",
+      kind: "group",
+      startText: "<i>Enviando para grupos...</i>",
+      targets: groups,
+      sendTarget: (group) => queuedCopyMessage(group.chatId, replyMsg.chat.id, replyMsg.message_id),
+      cleanupTarget: (group, err) => removeInactiveGroup(group.chatId, err),
+      progressTitle: "Envio para grupos em progresso",
+      doneTitle: "Envio para grupos concluido",
+      logPrefix: "SENDGP",
+    });
+  }
+
+  const rawText = msg.text.replace(/^\/sendgp(?:@\w+)?\s*/, "").trim();
+  const webPreview = rawText.startsWith("-d");
+  const text = webPreview ? rawText.substring(2).trim() : rawText;
+  if (!text) {
+    return bot.sendMessage(msg.chat.id, "Uso: /sendgp [-d] <texto> ou responda uma mensagem.");
+  }
+
+  return runCampaign({
+    msg,
+    name: "SENDGP",
+    kind: "group",
+    startText: "<i>Enviando para grupos...</i>",
+    targets: groups,
+    sendTarget: (group) => queuedSendMessage(group.chatId, text, { disable_web_page_preview: !webPreview }),
+    cleanupTarget: (group, err) => removeInactiveGroup(group.chatId, err),
+    progressTitle: "Envio para grupos em progresso",
+    doneTitle: "Envio para grupos concluido",
+    logPrefix: "SENDGP",
+  });
+}
+
 function buildDonationRequest(user) {
   if (isPtBr(user.lang_code)) {
     return {
@@ -2313,9 +2549,9 @@ exports.initHandler = () => {
         );
     });
 
-  bot.onText(/^\/bc\b/, bc);
-  bot.onText(/^\/broadcast\b/, broadcast);
-  bot.onText(/^\/sendgp/, sendgp);
+  bot.onText(/^\/bc\b/, bcCampaign);
+  bot.onText(/^\/broadcast\b/, broadcastCampaign);
+  bot.onText(/^\/sendgp/, sendgpCampaign);
 
   bot.onText(/^\/campaign$/, async (msg) => {
     if (!is_dev(msg.from.id)) return;

@@ -3,7 +3,9 @@ const {
   queueHigh,
   queueLow,
   setGlobal429,
+  setChat429,
   waitForGlobal429,
+  waitForChatThrottle,
 } = require("../src/queue");
 
 function sleep(ms) {
@@ -41,9 +43,17 @@ async function testGlobal429WaitIsImmediateWhenNotPaused() {
   assert(Date.now() - startedAt < 100, "waitForGlobal429 should resolve immediately when not paused");
 }
 
+async function testChat429Cooldown() {
+  setChat429(12345, 1);
+  const startedAt = Date.now();
+  await waitForChatThrottle(12345, false);
+  assert(Date.now() - startedAt >= 1800, "chat-specific 429 must delay only that chat");
+}
+
 async function main() {
   await testGlobal429PausesAndResumesQueues();
   await testGlobal429WaitIsImmediateWhenNotPaused();
+  await testChat429Cooldown();
   console.log("queue tests passed");
 }
 

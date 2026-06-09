@@ -62,19 +62,29 @@ class SimpleQueue {
   }
 }
 
+function positiveIntEnv(name, fallback, min = 1, max = 1000) {
+  const value = Number(process.env[name]);
+  if (!Number.isFinite(value) || value < min) return fallback;
+  return Math.min(max, Math.floor(value));
+}
+
+const HIGH_QUEUE_RPS = positiveIntEnv("TELEGRAM_HIGH_QUEUE_RPS", 30, 1, 30);
+const CAMPAIGN_QUEUE_RPS = positiveIntEnv("TELEGRAM_CAMPAIGN_QUEUE_RPS", 30, 1, 30);
+
 const highQueue = new SimpleQueue({
-  concurrency: 3,
+  concurrency: 1,
   interval: 1000,
-  intervalCap: 25,
+  intervalCap: HIGH_QUEUE_RPS,
 });
 
 const lowQueue = new SimpleQueue({
-  concurrency: 1,
+  concurrency: CAMPAIGN_QUEUE_RPS,
   interval: 1000,
-  intervalCap: 25,
+  intervalCap: CAMPAIGN_QUEUE_RPS,
 });
 
 const chatTimestamps = new Map();
+const chat429Until = new Map();
 const CHAT_THROTTLE_TTL = 60_000;
 const GROUP_MIN_INTERVAL = 3200;
 const PRIVATE_MIN_INTERVAL = 1050;
@@ -84,20 +94,39 @@ setInterval(() => {
   for (const [key, ts] of chatTimestamps) {
     if (now - ts > CHAT_THROTTLE_TTL) chatTimestamps.delete(key);
   }
+  for (const [key, until] of chat429Until) {
+    if (now >= until) chat429Until.delete(key);
+  }
 }, 60_000).unref();
 
 async function waitForChatThrottle(chatId, isGroup) {
   const key = chatId;
   const minInterval = isGroup ? GROUP_MIN_INTERVAL : PRIVATE_MIN_INTERVAL;
   const now = Date.now();
+  const pausedUntil = chat429Until.get(key) || 0;
+
+  if (pausedUntil > now) {
+    await new Promise((r) => setTimeout(r, pausedUntil - now));
+  }
+
   const lastSent = chatTimestamps.get(key) || 0;
-  const elapsed = now - lastSent;
+  const elapsed = Date.now() - lastSent;
 
   if (elapsed < minInterval) {
     await new Promise((r) => setTimeout(r, minInterval - elapsed));
   }
 
   chatTimestamps.set(key, Date.now());
+}
+
+function setChat429(chatId, retryAfterSeconds) {
+  if (chatId === null || chatId === undefined) return;
+  const retry = Math.max(1, Number(retryAfterSeconds) || 5);
+  const until = Date.now() + (retry + 1) * 1000;
+  const current = chat429Until.get(chatId) || 0;
+  if (until <= current + 500) return;
+  chat429Until.set(chatId, until);
+  console.warn(`[QUEUE] 429 chat ${chatId} - aguardando ${retry + 1}s`);
 }
 
 let global429Until = 0;
@@ -211,6 +240,7 @@ module.exports = {
   queueHigh,
   queueLow,
   setGlobal429,
+  setChat429,
   isGlobal429Paused,
   waitForGlobal429,
   setCampaignRunning,
