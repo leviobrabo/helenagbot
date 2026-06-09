@@ -1868,7 +1868,7 @@ async function bcCampaign(msg) {
     return bot.sendMessage(msg.chat.id, "<i>Uso: /bc [-d] &lt;texto&gt;</i>", { parse_mode: "HTML" });
   }
 
-  const users = await UserModel.find(BROADCAST_USER_FILTER).lean().select("user_id");
+  const users = await UserModel.find().lean().select("user_id");
   return runCampaign({
     msg,
     name: "BC",
