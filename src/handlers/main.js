@@ -814,6 +814,7 @@ async function main(message) {
 // ─── user / group registration ────────────────────────────────────────────────
 
 function saveUserInformation(message) {
+  if (message?.chat?.type !== "private") return;
   ensureUserSaved(message).catch(() => {});
 }
 
