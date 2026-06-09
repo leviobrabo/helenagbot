@@ -952,6 +952,7 @@ async function ensureUserSaved(message, options = {}) {
   const langCode = normalizeLangCode(user.language_code);
   const now = new Date();
   const source = options.source || "direct";
+  const isPrivateChat = message?.chat?.type === "private";
 
   try {
     const existing = await UserModel.findOne({ user_id: user.id }).lean().select("lang_manual");
@@ -961,6 +962,10 @@ async function ensureUserSaved(message, options = {}) {
       lastname: user.last_name,
       last_seen_at: now,
     };
+    if (isPrivateChat) {
+      setFields.private_seen_at = now;
+      setFields.can_broadcast = true;
+    }
     if (!existing?.lang_manual) setFields.lang_code = langCode;
     if (source !== "direct" && existing) setFields.start_source = source;
 
@@ -1856,7 +1861,7 @@ async function bcCampaign(msg) {
     return bot.sendMessage(msg.chat.id, "<i>Uso: /bc [-d] &lt;texto&gt;</i>", { parse_mode: "HTML" });
   }
 
-  const users = await UserModel.find().lean().select("user_id");
+  const users = await UserModel.find({ can_broadcast: true }).lean().select("user_id");
   return runCampaign({
     msg,
     name: "BC",
@@ -1883,7 +1888,7 @@ async function broadcastCampaign(msg) {
   }
 
   const reply = msg.reply_to_message;
-  const users = await UserModel.find().lean().select("user_id");
+  const users = await UserModel.find({ can_broadcast: true }).lean().select("user_id");
   return runCampaign({
     msg,
     name: "BROADCAST",
@@ -2394,6 +2399,7 @@ async function productStats(message) {
 
   const [
     numUsers,
+    broadcastUsers,
     numChats,
     numMessages,
     usersByLang,
@@ -2402,7 +2408,11 @@ async function productStats(message) {
     dau,
     wau,
     mau,
+    broadcastDau,
+    broadcastWau,
+    broadcastMau,
     silentUsers,
+    broadcastSilentUsers,
     payingUsers,
     canceledUsers,
     revenueAgg,
@@ -2413,6 +2423,7 @@ async function productStats(message) {
     funnelReply,
   ] = await Promise.all([
     UserModel.countDocuments(),
+    UserModel.countDocuments({ can_broadcast: true }),
     ChatModel.countDocuments({ is_ban: false }),
     MessageModel.countDocuments(),
     UserModel.aggregate([{ $group: { _id: "$lang_code", count: { $sum: 1 } } }, { $sort: { count: -1 } }]),
@@ -2421,7 +2432,14 @@ async function productStats(message) {
     UserModel.countDocuments({ activity_days: today }),
     UserModel.countDocuments({ last_seen_at: { $gte: wauCutoff } }),
     UserModel.countDocuments({ last_seen_at: { $gte: mauCutoff } }),
+    UserModel.countDocuments({ can_broadcast: true, activity_days: today }),
+    UserModel.countDocuments({ can_broadcast: true, private_seen_at: { $gte: wauCutoff } }),
+    UserModel.countDocuments({ can_broadcast: true, private_seen_at: { $gte: mauCutoff } }),
     UserModel.countDocuments({ $or: [{ last_seen_at: { $lt: mauCutoff } }, { last_seen_at: null }, { last_seen_at: { $exists: false } }] }),
+    UserModel.countDocuments({
+      can_broadcast: true,
+      $or: [{ private_seen_at: { $lt: mauCutoff } }, { private_seen_at: null }, { private_seen_at: { $exists: false } }],
+    }),
     UserModel.countDocuments({ is_paying: true }),
     UserModel.countDocuments({ subscription_canceled_at: { $ne: null } }),
     UserModel.aggregate([{ $group: { _id: null, revenue: { $sum: { $ifNull: ["$revenue_total", 0] } }, payments: { $sum: { $ifNull: ["$payment_count", 0] } } } }]),
@@ -2442,14 +2460,15 @@ async function productStats(message) {
   pages.push(
     `<b>Estatisticas - Helana</b>\n\n` +
     `<b>Usuarios totais:</b> <code>${numUsers}</code>\n` +
+    `<b>Usuarios broadcast/PV:</b> <code>${broadcastUsers}</code>\n` +
     `<b>Grupos ativos:</b> <code>${numChats}</code>\n` +
     `<b>Tipos:</b> <code>${escapeHtml(typeBreakdown || "sem dados")}</code>\n` +
     `<b>Mensagens aprendidas:</b> <code>${numMessages}</code>\n\n` +
-    `<b>DAU:</b> <code>${dau}</code>\n` +
-    `<b>WAU:</b> <code>${wau}</code>\n` +
-    `<b>MAU:</b> <code>${mau}</code>\n` +
-    `<b>WAU / Total:</b> <code>${percent(wau, numUsers)}</code>\n` +
-    `<b>Usuarios silenciosos 30d:</b> <code>${silentUsers}</code>\n\n` +
+    `<b>DAU PV:</b> <code>${broadcastDau}</code> <i>(total legado: ${dau})</i>\n` +
+    `<b>WAU PV:</b> <code>${broadcastWau}</code> <i>(total legado: ${wau})</i>\n` +
+    `<b>MAU PV:</b> <code>${broadcastMau}</code> <i>(total legado: ${mau})</i>\n` +
+    `<b>WAU PV / Broadcast:</b> <code>${percent(broadcastWau, broadcastUsers)}</code>\n` +
+    `<b>Usuarios PV silenciosos 30d:</b> <code>${broadcastSilentUsers}</code> <i>(total legado: ${silentUsers})</i>\n\n` +
     `<b>Atualizacao:</b> <code>${now.toLocaleString("pt-BR")}</code>`
   );
 
@@ -2474,8 +2493,8 @@ async function productStats(message) {
     `<b>D7:</b> <code>${d7.rate}</code> (<code>${d7.retained}/${d7.cohort}</code>)\n` +
     `<b>D30:</b> <code>${d30.rate}</code> (<code>${d30.retained}/${d30.cohort}</code>)\n\n` +
     `<b>Tempo medio ate 1a acao:</b> <code>${timeFormatter(avgFirstActionSec)}</code>\n` +
-    `<b>Base ativa 30d:</b> <code>${percent(mau, numUsers)}</code>\n` +
-    `<b>Churn aprox. 30d:</b> <code>${percent(silentUsers, numUsers)}</code>`
+    `<b>Base ativa PV 30d:</b> <code>${percent(broadcastMau, broadcastUsers)}</code>\n` +
+    `<b>Churn aprox. PV 30d:</b> <code>${percent(broadcastSilentUsers, broadcastUsers)}</code>`
   );
 
   const sourcesText = topSources.length ? topSources.map((s, i) => `<b>${i + 1}.</b> <code>${escapeHtml(s._id || "direct")}</code> - ${s.count}`).join("\n") : "Sem dados de origem.";

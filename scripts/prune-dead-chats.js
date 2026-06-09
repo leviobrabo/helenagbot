@@ -1,8 +1,13 @@
 require("dotenv").config();
 
+const fs = require("fs");
 const mongoose = require("mongoose");
 const TelegramBot = require("node-telegram-bot-api");
-const { ChatModel, UserModel } = require("../src/database");
+const ChatSchema = require("../src/database/models/groups");
+const userSchema = require("../src/database/models/users");
+
+const ChatModel = mongoose.models.Chat || mongoose.model("Chat", ChatSchema);
+const UserModel = mongoose.models.User || mongoose.model("User", userSchema);
 
 const args = new Set(process.argv.slice(2));
 const execute = args.has("--execute");
@@ -15,22 +20,25 @@ const delayMs = delayArg ? Math.max(0, Number(delayArg.split("=")[1]) || 0) : 60
 
 const bot = new TelegramBot(process.env.TELEGRAM_API, { polling: false });
 
+function dbString() {
+  try {
+    const envText = fs.readFileSync(".env", "utf8");
+    const first = envText.split(/\r?\n/).find((line) => /^\s*DB_STRING=/.test(line));
+    if (first) return first.replace(/^\s*DB_STRING=/, "").trim();
+  } catch (_) {}
+  return process.env.DB_STRING;
+}
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function waitForDb() {
-  if (mongoose.connection.readyState === 1) return;
-  await new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error("Timeout ao conectar no MongoDB")), 20000);
-    mongoose.connection.once("connected", () => {
-      clearTimeout(timer);
-      resolve();
-    });
-    mongoose.connection.once("error", (err) => {
-      clearTimeout(timer);
-      reject(err);
-    });
+  if (mongoose.connection.readyState === 1) {
+    return;
+  }
+  await mongoose.connect(dbString(), {
+    serverSelectionTimeoutMS: 10000,
   });
 }
 
@@ -115,7 +123,7 @@ async function pruneGroups() {
 }
 
 async function main() {
-  if (!process.env.TELEGRAM_API || !process.env.DB_STRING) {
+  if (!process.env.TELEGRAM_API || !dbString()) {
     throw new Error("Configure TELEGRAM_API e DB_STRING no ambiente.");
   }
 

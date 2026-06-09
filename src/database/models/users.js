@@ -12,6 +12,8 @@ const userSchema = new Schema({
   created_at: { type: Date, default: Date.now, index: true },
   first_seen_at: { type: Date, default: Date.now, index: true },
   last_seen_at: { type: Date, default: Date.now, index: true },
+  private_seen_at: { type: Date, default: null, index: true },
+  can_broadcast: { type: Boolean, default: false, index: true },
   activity_days: { type: [String], default: [], index: true },
   start_source: { type: String, default: "direct", index: true },
   first_action_at: { type: Date, default: null, index: true },

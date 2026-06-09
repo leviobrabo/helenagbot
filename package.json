@@ -4,9 +4,10 @@
     "description": "Toguro is a chatbot that sends messages, stickers and audios",
     "main": "index.js",
     "scripts": {
-        "test": "node --check src/queue.js && node --check src/bot.js && node --check src/handlers/main.js && node --check scripts/prune-dead-chats.js && node scripts/test-queue.js",
+        "test": "node --check src/queue.js && node --check src/bot.js && node --check src/handlers/main.js && node --check scripts/prune-dead-chats.js && node --check scripts/mark-private-broadcast-users.js && node scripts/test-queue.js",
         "start": "node src/index.js",
-        "prune:dead": "node scripts/prune-dead-chats.js"
+        "prune:dead": "node scripts/prune-dead-chats.js",
+        "mark:broadcast-users": "node scripts/mark-private-broadcast-users.js"
     },
     "repository": {
         "type": "git",
