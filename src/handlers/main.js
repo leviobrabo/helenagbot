@@ -29,6 +29,8 @@ const PIX_DONATION_KEY = process.env.PIX_DONATION_KEY || "32dc79d2-2868-4ef0-a27
 const DONATION_MONTHLY_LIMIT = 800;
 const PAID_BROADCAST_ENABLED = process.env.TELEGRAM_PAID_BROADCAST === "true";
 
+const BOT_START_TIME = Math.floor(Date.now() / 1000);
+
 let crashCount = 0;
 let lastCrashTime = 0;
 const CRASH_LIMIT = 5;
@@ -798,6 +800,7 @@ async function answerUser(message) {
 // ─── main message handler ─────────────────────────────────────────────────────
 
 async function main(message) {
+    if (message.date < BOT_START_TIME) return;
     try {
         const replyTo = message?.reply_to_message ?? false;
         const botId = await getBotId();
@@ -1073,6 +1076,7 @@ async function ensureGroupSaved(msg) {
 // ─── /start ───────────────────────────────────────────────────────────────────
 
 async function start(message) {
+    if (message.date < BOT_START_TIME) return;
     if (message.chat.type !== "private") return;
     
     // Garantir que usuário seja salvo
