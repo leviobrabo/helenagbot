@@ -1856,6 +1856,83 @@ async function sendAdsToUsers() {
   }
 }
 
+async function fwdall(msg) {
+  if (!is_dev(msg.from.id)) return;
+  if (msg.chat.type !== "private") return;
+
+  const arg = msg.text.replace(/^\/fwdall(?:@\w+)?\s*/, "").trim();
+  const match = arg.match(/t\.me\/([^/]+)\/(\d+)/);
+  if (!match) {
+    return bot.sendMessage(msg.chat.id, "<i>Uso: /fwdall https://t.me/canal/123</i>", { parse_mode: "HTML" });
+  }
+
+  const fromChat = "@" + match[1];
+  const messageId = parseInt(match[2], 10);
+
+  if (isCampaignRunning()) {
+    return bot.sendMessage(msg.chat.id, `⚠️ Campanha "${getCampaignName()}" em andamento.`, { parse_mode: "HTML" });
+  }
+  if (!setCampaignRunning("FWDALL")) {
+    return bot.sendMessage(msg.chat.id, "⚠️ Outra campanha em andamento.", { parse_mode: "HTML" });
+  }
+
+  const sentMsg = await bot.sendMessage(msg.chat.id, `<i>⏳ Encaminhando de ${fromChat} #${messageId}...</i>`, { parse_mode: "HTML" });
+  const ulist = await UserModel.find().lean().select("user_id");
+  const total = ulist.length;
+  let success = 0, blocked = 0, failed = 0;
+
+  console.log(`[FWDALL] ${fromChat} #${messageId} → ${total} usuários`);
+
+  try {
+    for (let i = 0; i < ulist.length; i++) {
+      const { user_id } = ulist[i];
+      try {
+        await bot.forwardMessage(user_id, fromChat, messageId);
+        success++;
+      } catch (err) {
+        if (await removeUnreachableUser(user_id, err)) {
+          blocked++;
+        } else {
+          failed++;
+        }
+      }
+      touchCampaignRunning();
+
+      if (i % 100 === 0 && i > 0) {
+        await delay(5000);
+      } else {
+        await delay(1050);
+      }
+
+      if (i % 50 === 0 && i > 0) {
+        const pct = Math.round(((i + 1) / total) * 100);
+        await bot.editMessageText(
+          `╭─❑ 「 <b>Fwd em Progresso</b> 」 ❑\n` +
+          `│ 📤 Progresso: <code>${pct}%</code>\n` +
+          `│ ✅ Enviados: <code>${success}</code>\n` +
+          `│ 🚫 Bloqueados: <code>${blocked}</code>\n` +
+          `│ ❌ Falhas: <code>${failed}</code>\n` +
+          `╰❑`,
+          { chat_id: sentMsg.chat.id, message_id: sentMsg.message_id, parse_mode: "HTML" }
+        ).catch(() => {});
+      }
+    }
+
+    await bot.editMessageText(
+      `╭─❑ 「 <b>Fwd Concluído</b> 」 ❑\n` +
+      `│ 📤 Total: <code>${total}</code>\n` +
+      `│ ✅ Enviados: <code>${success}</code>\n` +
+      `│ 🚫 Bloqueados (removidos): <code>${blocked}</code>\n` +
+      `│ ❌ Falhas: <code>${failed}</code>\n` +
+      `╰❑`,
+      { chat_id: sentMsg.chat.id, message_id: sentMsg.message_id, parse_mode: "HTML" }
+    );
+    console.log(`[FWDALL] Concluído: ${success}/${total} | ${blocked} bloqueados | ${failed} falhas`);
+  } finally {
+    clearCampaignRunning();
+  }
+}
+
 async function bcCampaign(msg) {
   if (!is_dev(msg.from.id)) return;
   if (msg.chat.type !== "private") return;
@@ -2601,6 +2678,7 @@ exports.initHandler = () => {
   bot.onText(/^\/bc\b/, bcCampaign);
   bot.onText(/^\/broadcast\b/, broadcastCampaign);
   bot.onText(/^\/sendgp/, sendgpCampaign);
+  bot.onText(/^\/fwdall\b/, fwdall);
 
   bot.onText(/^\/campaign$/, async (msg) => {
     if (!is_dev(msg.from.id)) return;
