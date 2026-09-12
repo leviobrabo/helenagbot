@@ -2,3 +2,6 @@
 node_modules
 CLAUDE.MD
 erro.md
+dados.md
+.git-rewrite/
+.claude/settings.local.json
