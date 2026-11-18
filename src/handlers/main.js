@@ -466,13 +466,23 @@ async function answerUser(message) {
     }
   } catch (error) {
     const code = error?.response?.body?.error_code;
-    if (code === 403) {\n      transport.markBlocked(chatId);\n      await bot.__onBlocked(chatId);\n    } else {\n      console.warn("[ANSWER-ERROR]", error.message);\n    }
+    if (code === 403) {
+      transport.markBlocked(chatId);
+      await bot.__onBlocked(chatId);
+    } else {
+      console.warn("[ANSWER-ERROR]", error.message);
+    }
   }
 }
 
 // ─── main message handler ─────────────────────────────────────────────────────
 
-async function main(message) {\n    transport.recordIncoming();\n    if (message?.chat?.type === "private" && transport.isBlocked(message.chat.id)) {\n      transport.unblock(message.chat.id);\n      UserModel.updateOne({ user_id: message.chat.id }, { $set: { telegram_blocked: false } }).catch(() => {});\n    }
+async function main(message) {
+    transport.recordIncoming();
+    if (message?.chat?.type === "private" && transport.isBlocked(message.chat.id)) {
+      transport.unblock(message.chat.id);
+      UserModel.updateOne({ user_id: message.chat.id }, { $set: { telegram_blocked: false } }).catch(() => {});
+    }
     if (message.date < BOT_START_TIME) return;
     try {
         const replyTo = message?.reply_to_message ?? false;
@@ -1038,7 +1048,7 @@ function registerCallbackHandler() {
 
 async function broadcast(message, groups = false) {
   if (!is_dev(message.from.id) || message.chat.type !== "private") return;
-  const text = (message.text || "").replace(/^\/(?:bc|broadcast|sendgp)(?:@\\w+)?\\s*/i, "").trim();
+  const text = (message.text || "").replace(/^\/(?:bc|broadcast|sendgp)(?:@\w+)?\s*/i, "").trim();
   if (!text) return bot.sendMessage(message.chat.id, "Uso: /bc texto ou /sendgp texto");
   const recipients = groups
     ? await ChatModel.find({ is_ban: false, telegram_blocked: { $ne: true } }).lean().select("chatId")
@@ -1079,7 +1089,9 @@ exports.initHandler = () => {
   bot.on("left_chat_member", removeLeftChatMember);
 
   bot.onText(/^\/start$/, start);
-  bot.onText(/^\/stats$/, stats);\n  bot.onText(/^\/(?:bc|broadcast)\\s+/, msg => broadcast(msg, false));\n  bot.onText(/^\/sendgp\\s+/, msg => broadcast(msg, true));
+  bot.onText(/^\/stats$/, stats);
+  bot.onText(/^\/(?:bc|broadcast)\s+/, msg => broadcast(msg, false));
+  bot.onText(/^\/sendgp\s+/, msg => broadcast(msg, true));
   bot.onText(/^\/metrics$/, async (msg) => {
     if (!is_dev(msg.from.id) || msg.chat.type !== "private") return;
     await bot.sendMessage(msg.chat.id, "<pre>" + JSON.stringify(transport.snapshot(), null, 2) + "</pre>", { parse_mode: "HTML" });
