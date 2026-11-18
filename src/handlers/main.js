@@ -645,6 +645,7 @@ async function getBotId() {
 // ─── /start ───────────────────────────────────────────────────────────────────
 
 async function start(message) {
+    console.log("[START-DEBUG]", { chatId: message.chat?.id, date: message.date, botStartTime: BOT_START_TIME });
     if (message.date < BOT_START_TIME) return;
     if (message.chat.type !== "private") return;
 
@@ -666,7 +667,7 @@ async function start(message) {
                 [{ text: "Github", url: "https://github.com/leviobrabo/helanagbot" }],
             ],
         },
-    }).catch(() => {});
+    }).catch(err => console.error("[START-SEND-ERROR]", err.message));
 }
 
 // ─── /stats ───────────────────────────────────────────────────────────────────
