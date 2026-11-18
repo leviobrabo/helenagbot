@@ -1,5 +1,5 @@
 const { MessageModel, ChatModel, UserModel } = require("../database");
-const { bot } = require("../bot");
+const { bot, transport } = require("../bot");
 const CronJob = require("cron").CronJob;
 const { setTimeout: delay } = require("timers/promises");
 const palavrasProibidas = require("./palavrasproibida.json");
@@ -443,7 +443,7 @@ async function answerUser(message) {
       if (!validReplies.length) return;
 
       const replyItem = randomItem(validReplies);
-      const typingTime = Math.min(Math.max(50 * replyItem.value.length, 200), 6000);
+      const typingTime = Math.min(Math.max(8 * replyItem.value.length, 40), 250);
       await bot.sendChatAction(chatId, "typing").catch(() => {});
       await delay(typingTime);
 
@@ -466,9 +466,11 @@ async function answerUser(message) {
     }
   } catch (error) {
     const code = error?.response?.body?.error_code;
-    if (error.message?.includes("CHAT_WRITE_FORBIDDEN") || code === 403) {
-      await bot.leaveChat(chatId).catch(() => {});
-      await ChatModel.deleteOne({ chatId }).catch(() => {});
+    if (code === 403) {
+      transport.markBlocked(chatId);
+      await bot.__onBlocked(chatId);
+    } else {
+      console.warn("[ANSWER-ERROR]", error.message);
     }
   }
 }
@@ -476,6 +478,11 @@ async function answerUser(message) {
 // ─── main message handler ─────────────────────────────────────────────────────
 
 async function main(message) {
+    transport.recordIncoming();
+    if (message?.chat?.type === "private" && transport.isBlocked(message.chat.id)) {
+      transport.unblock(message.chat.id);
+      UserModel.updateOne({ user_id: message.chat.id }, { $set: { telegram_blocked: false } }).catch(() => {});
+    }
     if (message.date < BOT_START_TIME) return;
     try {
         const replyTo = message?.reply_to_message ?? false;
@@ -1038,6 +1045,37 @@ function registerCallbackHandler() {
   });
 }
 
+
+async function broadcast(message, groups = false) {
+  if (!is_dev(message.from.id) || message.chat.type !== "private") return;
+  const text = (message.text || "").replace(/^\/(?:bc|broadcast|sendgp)(?:@\w+)?\s*/i, "").trim();
+  if (!text) return bot.sendMessage(message.chat.id, "Uso: /bc texto ou /sendgp texto");
+  const recipients = groups
+    ? await ChatModel.find({ is_ban: false, telegram_blocked: { $ne: true } }).lean().select("chatId")
+    : await UserModel.find({ telegram_blocked: { $ne: true } }).lean().select("user_id");
+  const started = Date.now();
+  const status = await bot.sendMessage(message.chat.id, "⏳ Iniciando envio para " + recipients.length + " destinos...");
+  let success = 0, blocked = 0, failed = 0;
+  for (let i = 0; i < recipients.length; i++) {
+    const id = groups ? recipients[i].chatId : recipients[i].user_id;
+    try {
+      await transport.sendBulk(id, text, { disable_web_page_preview: true });
+      success++;
+    } catch (e) {
+      if (e?.response?.body?.error_code === 403 || e?.blocked) {
+        blocked++;
+        await bot.__onBlocked(id);
+      } else { failed++; console.warn("[BROADCAST-ERROR]", id, e.message); }
+    }
+    if ((i + 1) % 50 === 0) {
+      await bot.editMessageText(`📤 ${i + 1}/${recipients.length} | OK ${success} | Bloqueados ${blocked} | Falhas ${failed}`, { chat_id: message.chat.id, message_id: status.message_id }).catch(() => {});
+    }
+  }
+  const elapsed = Date.now() - started;
+  transport.recordBroadcast(elapsed);
+  await bot.editMessageText(`✅ Envio concluído: ${success}/${recipients.length} | Bloqueados ${blocked} | Falhas ${failed} | ${Math.round(elapsed / 1000)}s`, { chat_id: message.chat.id, message_id: status.message_id }).catch(() => {});
+}
+
 // ─── initialization ──────────────────────────────────────────────────────────
 
 exports.initHandler = () => {
@@ -1052,6 +1090,12 @@ exports.initHandler = () => {
 
   bot.onText(/^\/start$/, start);
   bot.onText(/^\/stats$/, stats);
+  bot.onText(/^\/(?:bc|broadcast)\s+/, msg => broadcast(msg, false));
+  bot.onText(/^\/sendgp\s+/, msg => broadcast(msg, true));
+  bot.onText(/^\/metrics$/, async (msg) => {
+    if (!is_dev(msg.from.id) || msg.chat.type !== "private") return;
+    await bot.sendMessage(msg.chat.id, "<pre>" + JSON.stringify(transport.snapshot(), null, 2) + "</pre>", { parse_mode: "HTML" });
+  });
   bot.onText(/^\/grupos$/, groups);
   bot.onText(/^\/ban/, ban);
   bot.onText(/^\/unban/, unban);

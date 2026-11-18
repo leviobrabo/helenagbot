@@ -2,6 +2,7 @@ const { Schema } = require("mongoose");
 
 const userSchema = new Schema({
   user_id: { type: Number, required: true, unique: true, index: true },
+  telegram_blocked: { type: Boolean, default: false, index: true },
   username: { type: String },
   firstname: { type: String, required: true },
   lastname: { type: String },
