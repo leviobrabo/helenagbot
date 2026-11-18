@@ -2,6 +2,7 @@ const { Schema } = require("mongoose");
 
 const ChatSchema = new Schema({
   chatId: { type: Number, required: true, unique: true, index: true },
+  telegram_blocked: { type: Boolean, default: false, index: true },
   chatName: { type: String, required: true },
   chat_type: { type: String, default: "unknown", index: true },
   is_ban: { type: Boolean, default: false, index: true },
