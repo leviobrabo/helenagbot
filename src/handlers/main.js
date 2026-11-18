@@ -1,5 +1,5 @@
 const { MessageModel, ChatModel, UserModel } = require("../database");
-const { bot } = require("../bot");
+const { bot, transport } = require("../bot");
 const CronJob = require("cron").CronJob;
 const { setTimeout: delay } = require("timers/promises");
 const palavrasProibidas = require("./palavrasproibida.json");
@@ -443,7 +443,7 @@ async function answerUser(message) {
       if (!validReplies.length) return;
 
       const replyItem = randomItem(validReplies);
-      const typingTime = Math.min(Math.max(50 * replyItem.value.length, 200), 6000);
+      const typingTime = Math.min(Math.max(8 * replyItem.value.length, 40), 250);
       await bot.sendChatAction(chatId, "typing").catch(() => {});
       await delay(typingTime);
 
@@ -466,16 +466,13 @@ async function answerUser(message) {
     }
   } catch (error) {
     const code = error?.response?.body?.error_code;
-    if (error.message?.includes("CHAT_WRITE_FORBIDDEN") || code === 403) {
-      await bot.leaveChat(chatId).catch(() => {});
-      await ChatModel.deleteOne({ chatId }).catch(() => {});
-    }
+    if (code === 403) {\n      transport.markBlocked(chatId);\n      await bot.__onBlocked(chatId);\n    } else {\n      console.warn("[ANSWER-ERROR]", error.message);\n    }
   }
 }
 
 // ─── main message handler ─────────────────────────────────────────────────────
 
-async function main(message) {
+async function main(message) {\n    transport.recordIncoming();
     if (message.date < BOT_START_TIME) return;
     try {
         const replyTo = message?.reply_to_message ?? false;
@@ -1052,6 +1049,10 @@ exports.initHandler = () => {
 
   bot.onText(/^\/start$/, start);
   bot.onText(/^\/stats$/, stats);
+  bot.onText(/^\/metrics$/, async (msg) => {
+    if (!is_dev(msg.from.id) || msg.chat.type !== "private") return;
+    await bot.sendMessage(msg.chat.id, "<pre>" + JSON.stringify(transport.snapshot(), null, 2) + "</pre>", { parse_mode: "HTML" });
+  });
   bot.onText(/^\/grupos$/, groups);
   bot.onText(/^\/ban/, ban);
   bot.onText(/^\/unban/, unban);
