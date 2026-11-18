@@ -472,7 +472,7 @@ async function answerUser(message) {
 
 // ─── main message handler ─────────────────────────────────────────────────────
 
-async function main(message) {\n    transport.recordIncoming();
+async function main(message) {\n    transport.recordIncoming();\n    if (message?.chat?.type === "private" && transport.isBlocked(message.chat.id)) {\n      transport.unblock(message.chat.id);\n      UserModel.updateOne({ user_id: message.chat.id }, { $set: { telegram_blocked: false } }).catch(() => {});\n    }
     if (message.date < BOT_START_TIME) return;
     try {
         const replyTo = message?.reply_to_message ?? false;
